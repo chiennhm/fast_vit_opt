@@ -187,7 +187,7 @@ class WarmupCosineScheduler:
     def step(self, epoch):
         if epoch < self.warmup_epochs:
             # Linear warmup
-            alpha = epoch / max(self.warmup_epochs, 1)
+            alpha = (epoch + 1) / max(self.warmup_epochs, 1)
             for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
                 pg["lr"] = base_lr * alpha
         else:
