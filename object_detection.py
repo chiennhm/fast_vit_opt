@@ -17,7 +17,8 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 
 # Project imports
 from detection.fastvit_detector import FastViTDetector
@@ -226,7 +227,7 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
         optimizer.zero_grad()
 
         if args.amp and device.type == "cuda":
-            with autocast():
+            with autocast('cuda'):
                 cls_preds, reg_preds, anchors = model(images)
                 loss_dict = criterion(cls_preds, reg_preds, anchors, targets)
                 loss = loss_dict["cls_loss"] + loss_dict["reg_loss"]

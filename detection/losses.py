@@ -59,7 +59,7 @@ class FocalLoss(nn.Module):
         target_one_hot = torch.zeros_like(inputs)
         valid_mask = targets >= 0
         valid_targets = targets[valid_mask].long()
-        target_one_hot[valid_mask] = F.one_hot(valid_targets, num_classes).float()
+        target_one_hot[valid_mask] = F.one_hot(valid_targets, num_classes).to(target_one_hot.dtype)
 
         p = torch.sigmoid(inputs)
         ce_loss = F.binary_cross_entropy_with_logits(
