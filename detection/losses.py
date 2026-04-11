@@ -55,11 +55,16 @@ class FocalLoss(nn.Module):
         num_classes = inputs.shape[1]
 
         # Create one-hot targets
-        # targets: 0 = background, 1..C = classes
+        # targets: 0 = background (all-zeros), 1..C = object classes
+        # cls_preds has shape (N, num_classes) where index 0..C-1 maps to class 1..C
         target_one_hot = torch.zeros_like(inputs)
+        # Only positive samples (target > 0) get a one-hot entry
+        pos_mask = targets > 0
+        pos_targets = (targets[pos_mask] - 1).long()  # Convert 1-indexed → 0-indexed
+        target_one_hot[pos_mask] = F.one_hot(pos_targets, num_classes).to(target_one_hot.dtype)
+
+        # valid_mask: include both background (0) and positive (>0), exclude ignored (-1)
         valid_mask = targets >= 0
-        valid_targets = targets[valid_mask].long()
-        target_one_hot[valid_mask] = F.one_hot(valid_targets, num_classes).to(target_one_hot.dtype)
 
         p = torch.sigmoid(inputs)
         ce_loss = F.binary_cross_entropy_with_logits(
