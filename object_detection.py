@@ -4,6 +4,7 @@
 # Usage:
 #   python object_detection.py --data-dir ./data --model fastvit_sa12 --epochs 150
 #   python object_detection.py --data-dir ./data --model fastvit_t8 --batch-size 32
+#   python object_detection.py --wandb-project fastvit-det --wandb-name run1
 #
 
 import argparse
@@ -19,6 +20,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.amp import autocast
 from torch.cuda.amp import GradScaler
+
+# Optional wandb import
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
 
 # Project imports
 from detection.fastvit_detector import FastViTDetector
@@ -149,6 +157,24 @@ def parse_args():
         help="Save detection visualizations during evaluation"
     )
 
+    # Wandb
+    parser.add_argument(
+        "--wandb-project", type=str, default="fastvit-detection",
+        help="Wandb project name (default: fastvit-detection)"
+    )
+    parser.add_argument(
+        "--wandb-name", type=str, default=None,
+        help="Wandb run name (default: auto-generated)"
+    )
+    parser.add_argument(
+        "--wandb-entity", type=str, default=None,
+        help="Wandb entity/team name (optional)"
+    )
+    parser.add_argument(
+        "--no-wandb", action="store_true",
+        help="Disable wandb logging"
+    )
+
     # Misc
     parser.add_argument(
         "--workers", "-j", type=int, default=4,
@@ -167,6 +193,13 @@ def parse_args():
 
     if args.no_amp:
         args.amp = False
+
+    # Resolve wandb availability
+    args.use_wandb = HAS_WANDB and not args.no_wandb
+    if not args.no_wandb and not HAS_WANDB:
+        logging.getLogger("detection").warning(
+            "wandb not installed — logging disabled. Install with: pip install wandb"
+        )
 
     return args
 
@@ -249,20 +282,36 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
             optimizer.step()
 
         batch_size = images.shape[0]
-        total_cls_loss += loss_dict["cls_loss"].item() * batch_size
-        total_reg_loss += loss_dict["reg_loss"].item() * batch_size
+        cls_loss_val = loss_dict["cls_loss"].item()
+        reg_loss_val = loss_dict["reg_loss"].item()
+        total_loss_val = loss.item()
+        total_cls_loss += cls_loss_val * batch_size
+        total_reg_loss += reg_loss_val * batch_size
         total_samples += batch_size
 
-        # Logging
+        # Global step for wandb
+        global_step = epoch * num_batches + batch_idx
+
+        # Wandb per-step logging
+        if args.use_wandb:
+            wandb.log({
+                "train/cls_loss": cls_loss_val,
+                "train/reg_loss": reg_loss_val,
+                "train/total_loss": total_loss_val,
+                "train/num_pos": loss_dict["num_pos"],
+                "train/lr": optimizer.param_groups[0]["lr"],
+            }, step=global_step)
+
+        # Console logging
         if (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
             elapsed = time.time() - start_time
             eta = elapsed / (batch_idx + 1) * (num_batches - batch_idx - 1)
             lr = optimizer.param_groups[0]["lr"]
             logger.info(
                 f"Epoch [{epoch}][{batch_idx+1}/{num_batches}] "
-                f"cls_loss: {loss_dict['cls_loss'].item():.4f} "
-                f"reg_loss: {loss_dict['reg_loss'].item():.4f} "
-                f"total: {loss.item():.4f} "
+                f"cls_loss: {cls_loss_val:.4f} "
+                f"reg_loss: {reg_loss_val:.4f} "
+                f"total: {total_loss_val:.4f} "
                 f"pos: {loss_dict['num_pos']} "
                 f"lr: {lr:.6f} "
                 f"ETA: {eta:.0f}s"
@@ -383,6 +432,23 @@ def main():
     with open(os.path.join(output_dir, "args.txt"), "w") as f:
         for k, v in vars(args).items():
             f.write(f"{k}: {v}\n")
+
+    # ========================================================================
+    # Wandb init
+    # ========================================================================
+    if args.use_wandb:
+        wandb_run_name = args.wandb_name or f"{args.model}_{timestamp}"
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=wandb_run_name,
+            config=vars(args),
+            dir=output_dir,
+            resume="allow",
+        )
+        # Watch model for gradient/parameter histograms
+        wandb.watch(model, log="gradients", log_freq=100)
+        logger.info(f"Wandb initialized: {wandb.run.url}")
 
     # ========================================================================
     # Datasets
@@ -527,6 +593,16 @@ def main():
             f"total: {train_metrics['total_loss']:.4f}"
         )
 
+        # Wandb epoch-level training metrics
+        if args.use_wandb:
+            wandb.log({
+                "epoch": epoch,
+                "epoch/cls_loss": train_metrics["cls_loss"],
+                "epoch/reg_loss": train_metrics["reg_loss"],
+                "epoch/total_loss": train_metrics["total_loss"],
+                "epoch/lr": optimizer.param_groups[0]["lr"],
+            })
+
         # Evaluate
         is_eval_epoch = (epoch + 1) % args.eval_interval == 0 or epoch == args.epochs - 1
         if is_eval_epoch:
@@ -540,6 +616,19 @@ def main():
             current_map = results["mAP"]
             is_best = current_map > best_map
             best_map = max(best_map, current_map)
+
+            # Wandb eval metrics
+            if args.use_wandb:
+                eval_log = {
+                    "epoch": epoch,
+                    "eval/mAP": current_map,
+                    "eval/best_mAP": best_map,
+                }
+                # Per-class AP
+                for cls_name, ap in results["ap_per_class"].items():
+                    if ap is not None:
+                        eval_log[f"eval/AP/{cls_name}"] = ap
+                wandb.log(eval_log)
 
             # Save checkpoint
             checkpoint_state = {
@@ -572,6 +661,10 @@ def main():
 
     logger.info(f"\nTraining completed! Best mAP: {best_map * 100:.2f}%")
     logger.info(f"Checkpoints saved to: {output_dir}")
+
+    # Wandb finish
+    if args.use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
