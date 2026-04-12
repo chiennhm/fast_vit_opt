@@ -446,8 +446,6 @@ def main():
             dir=output_dir,
             resume="allow",
         )
-        # Watch model for gradient/parameter histograms
-        wandb.watch(model, log="gradients", log_freq=100)
         logger.info(f"Wandb initialized: {wandb.run.url}")
 
     # ========================================================================
@@ -499,6 +497,10 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Total parameters: {total_params / 1e6:.2f}M")
     logger.info(f"Trainable parameters: {trainable_params / 1e6:.2f}M")
+
+    # Watch model gradients in wandb
+    if args.use_wandb:
+        wandb.watch(model, log="gradients", log_freq=100)
 
     # ========================================================================
     # Loss, Optimizer, Scheduler
