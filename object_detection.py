@@ -289,10 +289,7 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
         total_reg_loss += reg_loss_val * batch_size
         total_samples += batch_size
 
-        # Global step for wandb
-        global_step = epoch * num_batches + batch_idx
-
-        # Wandb per-step logging
+        # Wandb per-step logging (no explicit step to avoid conflicts)
         if args.use_wandb:
             wandb.log({
                 "train/cls_loss": cls_loss_val,
@@ -300,7 +297,7 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
                 "train/total_loss": total_loss_val,
                 "train/num_pos": loss_dict["num_pos"],
                 "train/lr": optimizer.param_groups[0]["lr"],
-            }, step=global_step)
+            })
 
         # Console logging
         if (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
@@ -447,6 +444,10 @@ def main():
             resume="allow",
         )
         logger.info(f"Wandb initialized: {wandb.run.url}")
+        # Define x-axis for epoch-level and eval metrics
+        wandb.define_metric("epoch")
+        wandb.define_metric("epoch/*", step_metric="epoch")
+        wandb.define_metric("eval/*", step_metric="epoch")
 
     # ========================================================================
     # Datasets
@@ -595,18 +596,9 @@ def main():
             f"total: {train_metrics['total_loss']:.4f}"
         )
 
-        # Wandb epoch-level training metrics
-        if args.use_wandb:
-            wandb.log({
-                "epoch": epoch,
-                "epoch/cls_loss": train_metrics["cls_loss"],
-                "epoch/reg_loss": train_metrics["reg_loss"],
-                "epoch/total_loss": train_metrics["total_loss"],
-                "epoch/lr": optimizer.param_groups[0]["lr"],
-            })
-
         # Evaluate
         is_eval_epoch = (epoch + 1) % args.eval_interval == 0 or epoch == args.epochs - 1
+        current_map = None
         if is_eval_epoch:
             results = evaluate(
                 model, val_loader, device, args,
@@ -619,19 +611,25 @@ def main():
             is_best = current_map > best_map
             best_map = max(best_map, current_map)
 
-            # Wandb eval metrics
-            if args.use_wandb:
-                eval_log = {
-                    "epoch": epoch,
-                    "eval/mAP": current_map,
-                    "eval/best_mAP": best_map,
-                }
+        # Wandb epoch-level logging (train + eval in one call)
+        if args.use_wandb:
+            epoch_log = {
+                "epoch": epoch,
+                "epoch/cls_loss": train_metrics["cls_loss"],
+                "epoch/reg_loss": train_metrics["reg_loss"],
+                "epoch/total_loss": train_metrics["total_loss"],
+                "epoch/lr": optimizer.param_groups[0]["lr"],
+            }
+            if current_map is not None:
+                epoch_log["eval/mAP"] = current_map
+                epoch_log["eval/best_mAP"] = best_map
                 # Per-class AP
                 for cls_name, ap in results["ap_per_class"].items():
                     if ap is not None:
-                        eval_log[f"eval/AP/{cls_name}"] = ap
-                wandb.log(eval_log)
+                        epoch_log[f"eval/AP/{cls_name}"] = ap
+            wandb.log(epoch_log)
 
+        if is_eval_epoch:
             # Save checkpoint
             checkpoint_state = {
                 "epoch": epoch,
