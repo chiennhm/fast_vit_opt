@@ -20,7 +20,7 @@ LR=0.001
 WORKERS=4
 DATA_DIR=./data
 OUTPUT_DIR=./output/detection
-EVAL_INTERVAL=5
+EVAL_INTERVAL=1
 
 # Wandb
 WANDB_PROJECT="fastvit-detection"
