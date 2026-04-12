@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.amp import autocast
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 
 # Optional wandb import
 try:
@@ -538,7 +538,7 @@ def main():
         total_epochs=args.epochs,
     )
 
-    scaler = GradScaler() if args.amp and device.type == "cuda" else None
+    scaler = GradScaler('cuda') if args.amp and device.type == "cuda" else None
 
     # ========================================================================
     # Resume
