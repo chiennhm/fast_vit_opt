@@ -22,6 +22,10 @@ DATA_DIR=./data
 OUTPUT_DIR=./output/detection
 EVAL_INTERVAL=5
 
+# Wandb
+WANDB_PROJECT="fastvit-detection"
+WANDB_NAME="${MODEL}_bs${BATCH_SIZE}_ep${EPOCHS}"
+
 # --- Print config ---
 echo "============================================================"
 echo "  FastViT Object Detection Training"
@@ -33,8 +37,10 @@ echo "  Epochs:       ${EPOCHS}"
 echo "  LR:           ${LR}"
 echo "  Data dir:     ${DATA_DIR}"
 echo "  Output dir:   ${OUTPUT_DIR}"
+echo "  Wandb:        ${WANDB_PROJECT} / ${WANDB_NAME}"
 echo "============================================================"
 echo ""
+
 
 # --- Run training ---
 python object_detection.py \
@@ -47,6 +53,8 @@ python object_detection.py \
     --workers ${WORKERS} \
     --output ${OUTPUT_DIR} \
     --eval-interval ${EVAL_INTERVAL} \
+    --wandb-project ${WANDB_PROJECT} \
+    --wandb-name ${WANDB_NAME} \
     --save-visualizations
 
 echo ""
