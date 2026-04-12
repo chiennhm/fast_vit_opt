@@ -87,21 +87,22 @@ class VOCDetectionDataset(Dataset):
         Returns:
             boxes: list of [x1, y1, x2, y2]
             labels: list of class indices (1-indexed)
+            difficults: list of bools
         """
         tree = ET.parse(ann_path)
         root = tree.getroot()
 
         boxes = []
         labels = []
+        difficults = []
 
         for obj in root.findall("object"):
             name = obj.find("name").text
             if name not in CLASS_TO_IDX:
                 continue
 
-            difficult = obj.find("difficult")
-            if difficult is not None and int(difficult.text) == 1:
-                continue  # Skip difficult objects during training
+            diff_elem = obj.find("difficult")
+            is_difficult = diff_elem is not None and int(diff_elem.text) == 1
 
             bndbox = obj.find("bndbox")
             x1 = float(bndbox.find("xmin").text) - 1  # VOC coords are 1-indexed
@@ -111,8 +112,9 @@ class VOCDetectionDataset(Dataset):
 
             boxes.append([x1, y1, x2, y2])
             labels.append(CLASS_TO_IDX[name])
+            difficults.append(is_difficult)
 
-        return boxes, labels
+        return boxes, labels, difficults
 
     def __getitem__(self, idx):
         img_path, ann_path = self.entries[idx]
@@ -121,31 +123,48 @@ class VOCDetectionDataset(Dataset):
         image = Image.open(img_path).convert("RGB")
         orig_w, orig_h = image.size
 
-        # Parse annotation
-        boxes, labels = self._parse_annotation(ann_path)
+        # Parse annotation (includes difficult objects)
+        boxes, labels, difficults = self._parse_annotation(ann_path)
 
         if len(boxes) == 0:
             boxes = np.zeros((0, 4), dtype=np.float32)
             labels = np.array([], dtype=np.int64)
+            difficults = np.array([], dtype=bool)
         else:
             boxes = np.array(boxes, dtype=np.float32)
             labels = np.array(labels, dtype=np.int64)
+            difficults = np.array(difficults, dtype=bool)
 
-        # Apply augmentations
-        if self.augment and len(boxes) > 0:
-            image, boxes = self._augment(image, boxes)
+        if self.augment:
+            # For training: exclude difficult objects from augmentation & targets
+            easy_mask = ~difficults
+            train_boxes = boxes[easy_mask] if easy_mask.any() else np.zeros((0, 4), dtype=np.float32)
+            train_labels = labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
 
-        # Resize image and boxes
-        image, boxes = self._resize(image, boxes, self.img_size)
+            if len(train_boxes) > 0:
+                image, train_boxes = self._augment(image, train_boxes)
 
-        # Convert to tensor and normalize
-        image = TF.to_tensor(image)
-        image = TF.normalize(image, self.mean, self.std)
+            image, train_boxes = self._resize(image, train_boxes, self.img_size)
 
-        targets = {
-            "boxes": torch.tensor(boxes, dtype=torch.float32),
-            "labels": torch.tensor(labels, dtype=torch.int64),
-        }
+            image = TF.to_tensor(image)
+            image = TF.normalize(image, self.mean, self.std)
+
+            targets = {
+                "boxes": torch.tensor(train_boxes, dtype=torch.float32),
+                "labels": torch.tensor(train_labels, dtype=torch.int64),
+            }
+        else:
+            # For eval: keep all objects, pass difficult flag
+            image, boxes = self._resize(image, boxes, self.img_size)
+
+            image = TF.to_tensor(image)
+            image = TF.normalize(image, self.mean, self.std)
+
+            targets = {
+                "boxes": torch.tensor(boxes, dtype=torch.float32),
+                "labels": torch.tensor(labels, dtype=torch.int64),
+                "difficults": torch.tensor(difficults, dtype=torch.bool),
+            }
 
         return image, targets
 

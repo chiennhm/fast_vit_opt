@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from torchvision.ops import nms
 
 from timm.models import create_model
 import models  # noqa: F401, registers FastViT variants
@@ -213,11 +214,17 @@ class FastViTDetector(nn.Module):
         # Get embed dims for this variant
         embed_dims = self.EMBED_DIMS[model_name]
 
+        # Validate anchor_sizes matches number of FPN levels (= backbone stages)
+        assert len(anchor_sizes) == len(embed_dims), (
+            f"anchor_sizes ({len(anchor_sizes)}) must match "
+            f"FPN levels ({len(embed_dims)})"
+        )
+
         # Create backbone with fork_feat=True for multi-scale features
+        # (num_classes omitted — classification head is unused with fork_feat)
         self.backbone = create_model(
             model_name,
             fork_feat=True,
-            num_classes=num_classes,
         )
 
         # Load pretrained backbone if provided
@@ -302,7 +309,7 @@ class FastViTDetector(nn.Module):
         Returns:
             results: list of dicts with 'boxes', 'labels', 'scores'
         """
-        self.eval()
+        # NOTE: caller should ensure model is in eval mode before calling predict()
         cls_preds, reg_preds, anchors = self.forward(images)
 
         batch_size = cls_preds.shape[0]
@@ -335,7 +342,6 @@ class FastViTDetector(nn.Module):
                 cls_boxes = boxes[keep]
 
                 # NMS
-                from torchvision.ops import nms
 
                 keep_idx = nms(cls_boxes, cls_scores, nms_thresh)
                 all_boxes.append(cls_boxes[keep_idx])

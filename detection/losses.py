@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from collections import OrderedDict
 
 
 def box_iou(boxes1, boxes2):
@@ -77,8 +78,8 @@ class FocalLoss(nn.Module):
 
         loss = focal_weight * ce_loss
 
-        # Ignore samples with target == -1
-        loss = loss[valid_mask]
+        # Ignore samples with target == -1 (explicit broadcast for 2D loss)
+        loss = loss * valid_mask.unsqueeze(1).float()
 
         if self.reduction == "sum":
             return loss.sum()
@@ -121,6 +122,8 @@ class SmoothL1Loss(nn.Module):
 class AnchorGenerator:
     """Generate anchors for each FPN level."""
 
+    CACHE_MAX_SIZE = 8
+
     def __init__(
         self,
         sizes=(32, 64, 128, 256, 512),
@@ -131,7 +134,7 @@ class AnchorGenerator:
         self.aspect_ratios = aspect_ratios
         self.scales = scales
         self.num_anchors = len(aspect_ratios) * len(scales)
-        self._cache = {}
+        self._cache = OrderedDict()
 
     def _generate_base_anchors(self, size):
         """Generate base anchors for a given size."""
@@ -156,6 +159,7 @@ class AnchorGenerator:
         """
         cache_key = (tuple(feature_maps), tuple(image_size), str(device))
         if cache_key in self._cache:
+            self._cache.move_to_end(cache_key)
             return self._cache[cache_key]
 
         all_anchors = []
@@ -183,6 +187,8 @@ class AnchorGenerator:
 
         result = torch.cat(all_anchors, dim=0)
         self._cache[cache_key] = result
+        if len(self._cache) > self.CACHE_MAX_SIZE:
+            self._cache.popitem(last=False)
         return result
 
 
@@ -199,18 +205,18 @@ def encode_boxes(gt_boxes, anchors):
     # Convert to center form
     a_cx = (anchors[:, 0] + anchors[:, 2]) / 2
     a_cy = (anchors[:, 1] + anchors[:, 3]) / 2
-    a_w = anchors[:, 2] - anchors[:, 0]
-    a_h = anchors[:, 3] - anchors[:, 1]
+    a_w = (anchors[:, 2] - anchors[:, 0]).clamp(min=1e-7)
+    a_h = (anchors[:, 3] - anchors[:, 1]).clamp(min=1e-7)
 
     g_cx = (gt_boxes[:, 0] + gt_boxes[:, 2]) / 2
     g_cy = (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2
     g_w = gt_boxes[:, 2] - gt_boxes[:, 0]
     g_h = gt_boxes[:, 3] - gt_boxes[:, 1]
 
-    tx = (g_cx - a_cx) / (a_w + 1e-7)
-    ty = (g_cy - a_cy) / (a_h + 1e-7)
-    tw = torch.log(g_w / (a_w + 1e-7) + 1e-7)
-    th = torch.log(g_h / (a_h + 1e-7) + 1e-7)
+    tx = (g_cx - a_cx) / a_w
+    ty = (g_cy - a_cy) / a_h
+    tw = torch.log((g_w / a_w).clamp(min=1e-7))
+    th = torch.log((g_h / a_h).clamp(min=1e-7))
 
     return torch.stack([tx, ty, tw, th], dim=1)
 
@@ -227,11 +233,11 @@ def decode_boxes(deltas, anchors):
     """
     a_cx = (anchors[:, 0] + anchors[:, 2]) / 2
     a_cy = (anchors[:, 1] + anchors[:, 3]) / 2
-    a_w = anchors[:, 2] - anchors[:, 0]
-    a_h = anchors[:, 3] - anchors[:, 1]
+    a_w = (anchors[:, 2] - anchors[:, 0]).clamp(min=1e-7)
+    a_h = (anchors[:, 3] - anchors[:, 1]).clamp(min=1e-7)
 
-    pred_cx = deltas[:, 0] * a_w + a_cx
-    pred_cy = deltas[:, 1] * a_h + a_cy
+    pred_cx = deltas[:, 0].clamp(min=-10, max=10) * a_w + a_cx
+    pred_cy = deltas[:, 1].clamp(min=-10, max=10) * a_h + a_cy
     pred_w = torch.exp(deltas[:, 2].clamp(max=math.log(1000.0))) * a_w
     pred_h = torch.exp(deltas[:, 3].clamp(max=math.log(1000.0))) * a_h
 
@@ -298,11 +304,11 @@ class DetectionLoss(nn.Module):
                 cls_targets = torch.zeros(
                     anchors.shape[0], dtype=torch.long, device=device
                 )
-                reg_targets = torch.zeros(
-                    anchors.shape[0], 4, dtype=torch.float32, device=device
-                )
                 all_cls_preds.append(cls_preds[b])
                 all_cls_targets.append(cls_targets)
+                # Append empty reg tensors for symmetry with GT branch
+                all_reg_preds.append(reg_preds[b][:0])
+                all_reg_targets.append(torch.zeros(0, 4, device=device))
                 continue
 
             # Compute IoU between anchors and GT boxes
@@ -335,9 +341,9 @@ class DetectionLoss(nn.Module):
                 cls_targets[anchor_i] = gt_labels[gt_i]
                 pos_mask[anchor_i] = True
 
-            # Encode regression targets
-            matched_gt_boxes = gt_boxes[max_idx]
-            reg_targets = encode_boxes(matched_gt_boxes, anchors)
+            # Encode regression targets (only for positive anchors)
+            matched_gt = gt_boxes[max_idx[pos_mask]]
+            reg_targets_pos = encode_boxes(matched_gt, anchors[pos_mask])
 
             num_pos = pos_mask.sum().item()
             total_pos += num_pos
@@ -345,7 +351,7 @@ class DetectionLoss(nn.Module):
             all_cls_preds.append(cls_preds[b])
             all_cls_targets.append(cls_targets)
             all_reg_preds.append(reg_preds[b][pos_mask])
-            all_reg_targets.append(reg_targets[pos_mask])
+            all_reg_targets.append(reg_targets_pos)
 
         # Flatten and compute losses
         all_cls_preds = torch.cat(all_cls_preds, dim=0)

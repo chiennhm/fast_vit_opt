@@ -493,7 +493,7 @@ def main():
             model, val_loader, device, args,
             save_vis=args.save_visualizations, output_dir=output_dir,
         )
-        print_eval_results(results)
+        print_eval_results(results, logger_fn=logger.info)
         return
 
     # ========================================================================
@@ -535,7 +535,7 @@ def main():
                 save_vis=args.save_visualizations and epoch == args.epochs - 1,
                 output_dir=output_dir,
             )
-            print_eval_results(results)
+            print_eval_results(results, logger_fn=logger.info)
 
             current_map = results["mAP"]
             is_best = current_map > best_map
