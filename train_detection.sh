@@ -50,6 +50,9 @@ python object_detection.py \
     --img-size ${IMG_SIZE} \
     --epochs ${EPOCHS} \
     --lr ${LR} \
+    --warmup-epochs 5 \
+    --weight-decay 0.05 \
+    --clip-grad 1.0 \
     --workers ${WORKERS} \
     --output ${OUTPUT_DIR} \
     --eval-interval ${EVAL_INTERVAL} \

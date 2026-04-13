@@ -97,8 +97,8 @@ def parse_args():
         help="Batch size (default: 16)"
     )
     parser.add_argument(
-        "--lr", type=float, default=1e-3,
-        help="Initial learning rate (default: 1e-3)"
+        "--lr", type=float, default=1e-4,
+        help="Initial learning rate (default: 1e-4)"
     )
     parser.add_argument(
         "--weight-decay", type=float, default=0.05,
@@ -109,8 +109,8 @@ def parse_args():
         help="Warmup epochs (default: 5)"
     )
     parser.add_argument(
-        "--clip-grad", type=float, default=10.0,
-        help="Gradient clipping norm (default: 10.0)"
+        "--clip-grad", type=float, default=5.0,
+        help="Gradient clipping norm (default: 5.0)"
     )
 
     # Loss
@@ -210,12 +210,12 @@ def parse_args():
 class WarmupCosineScheduler:
     """Linear warmup followed by cosine annealing."""
 
-    def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr=1e-6):
+    def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr_ratio=0.01):
         self.optimizer = optimizer
         self.warmup_epochs = warmup_epochs
         self.total_epochs = total_epochs
-        self.min_lr = min_lr
         self.base_lrs = [pg["lr"] for pg in optimizer.param_groups]
+        self.min_lrs = [lr * min_lr_ratio for lr in self.base_lrs]
 
     def step(self, epoch):
         if epoch < self.warmup_epochs:
@@ -228,8 +228,8 @@ class WarmupCosineScheduler:
             progress = (epoch - self.warmup_epochs) / max(
                 self.total_epochs - self.warmup_epochs, 1
             )
-            for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
-                pg["lr"] = self.min_lr + 0.5 * (base_lr - self.min_lr) * (
+            for pg, base_lr, min_lr in zip(self.optimizer.param_groups, self.base_lrs, self.min_lrs):
+                pg["lr"] = min_lr + 0.5 * (base_lr - min_lr) * (
                     1 + math.cos(math.pi * progress)
                 )
 
@@ -266,9 +266,10 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
                 loss = loss_dict["cls_loss"] + loss_dict["reg_loss"]
 
             scaler.scale(loss).backward()
+            grad_norm = None
             if args.clip_grad:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -277,8 +278,9 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
             loss = loss_dict["cls_loss"] + loss_dict["reg_loss"]
 
             loss.backward()
+            grad_norm = None
             if args.clip_grad:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
             optimizer.step()
 
         batch_size = images.shape[0]
@@ -289,28 +291,35 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
         total_reg_loss += reg_loss_val * batch_size
         total_samples += batch_size
 
-        # Wandb per-step logging (no explicit step to avoid conflicts)
+        # Wandb per-step logging
+        global_step = epoch * num_batches + batch_idx
         if args.use_wandb:
-            wandb.log({
+            log_dict = {
                 "train/cls_loss": cls_loss_val,
                 "train/reg_loss": reg_loss_val,
                 "train/total_loss": total_loss_val,
                 "train/num_pos": loss_dict["num_pos"],
-                "train/lr": optimizer.param_groups[0]["lr"],
-            })
+                "train/lr_backbone": optimizer.param_groups[0]["lr"],
+                "train/lr_head": optimizer.param_groups[2]["lr"],
+            }
+            if grad_norm is not None:
+                log_dict["train/grad_norm"] = grad_norm
+            wandb.log(log_dict, step=global_step)
 
         # Console logging
         if (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
             elapsed = time.time() - start_time
             eta = elapsed / (batch_idx + 1) * (num_batches - batch_idx - 1)
-            lr = optimizer.param_groups[0]["lr"]
+            lr_backbone = optimizer.param_groups[0]["lr"]
+            lr_head = optimizer.param_groups[2]["lr"]
             logger.info(
                 f"Epoch [{epoch}][{batch_idx+1}/{num_batches}] "
                 f"cls_loss: {cls_loss_val:.4f} "
                 f"reg_loss: {reg_loss_val:.4f} "
                 f"total: {total_loss_val:.4f} "
                 f"pos: {loss_dict['num_pos']} "
-                f"lr: {lr:.6f} "
+                f"lr_head: {lr_head:.6f} "
+                f"grad_norm: {(grad_norm or 0.0):.2f} "
                 f"ETA: {eta:.0f}s"
             )
 
@@ -387,7 +396,7 @@ def save_checkpoint(state, output_dir, filename="checkpoint.pth"):
 
 def load_checkpoint(filepath, model, optimizer=None, scaler=None):
     """Load checkpoint."""
-    checkpoint = torch.load(filepath, map_location="cpu")
+    checkpoint = torch.load(filepath, map_location="cpu", weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     start_epoch = checkpoint.get("epoch", 0) + 1
     best_map = checkpoint.get("best_map", 0.0)
@@ -595,8 +604,9 @@ def main():
 
     for epoch in range(start_epoch, args.epochs):
         scheduler.step(epoch)
-        lr = optimizer.param_groups[0]["lr"]
-        logger.info(f"\nEpoch {epoch}/{args.epochs - 1} | LR: {lr:.6f}")
+        lr_backbone = optimizer.param_groups[0]["lr"]
+        lr_head = optimizer.param_groups[2]["lr"]
+        logger.info(f"\nEpoch {epoch}/{args.epochs - 1} | LR Head: {lr_head:.6f} | LR Backbone: {lr_backbone:.6f}")
 
         # Train
         train_metrics = train_one_epoch(
@@ -613,6 +623,7 @@ def main():
         # Evaluate
         is_eval_epoch = (epoch + 1) % args.eval_interval == 0 or epoch == args.epochs - 1
         current_map = None
+        is_best = False
         if is_eval_epoch:
             results = evaluate(
                 model, val_loader, device, args,
@@ -627,12 +638,14 @@ def main():
 
         # Wandb epoch-level logging (train + eval in one call)
         if args.use_wandb:
+            global_step = (epoch + 1) * len(train_loader) - 1
             epoch_log = {
                 "epoch": epoch,
                 "epoch/cls_loss": train_metrics["cls_loss"],
                 "epoch/reg_loss": train_metrics["reg_loss"],
                 "epoch/total_loss": train_metrics["total_loss"],
-                "epoch/lr": optimizer.param_groups[0]["lr"],
+                "epoch/lr_backbone": optimizer.param_groups[0]["lr"],
+                "epoch/lr_head": optimizer.param_groups[2]["lr"],
             }
             if current_map is not None:
                 epoch_log["eval/mAP"] = current_map
@@ -641,7 +654,7 @@ def main():
                 for cls_name, ap in results["ap_per_class"].items():
                     if ap is not None:
                         epoch_log[f"eval/AP/{cls_name}"] = ap
-            wandb.log(epoch_log)
+            wandb.log(epoch_log, step=global_step)
 
         if is_eval_epoch:
             # Save checkpoint
