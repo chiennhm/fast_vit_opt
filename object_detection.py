@@ -109,8 +109,8 @@ def parse_args():
         help="Warmup epochs (default: 5)"
     )
     parser.add_argument(
-        "--clip-grad", type=float, default=1.0,
-        help="Gradient clipping norm (default: 1.0)"
+        "--clip-grad", type=float, default=10.0,
+        help="Gradient clipping norm (default: 10.0)"
     )
 
     # Loss
@@ -512,21 +512,35 @@ def main():
         gamma=args.focal_gamma,
     )
 
-    # Separate weight decay for conv/linear vs bias/norm
+    # Separate weight decay for conv/linear vs bias/norm, and backbone vs head
     decay_params = []
     no_decay_params = []
+    backbone_decay_params = []
+    backbone_no_decay_params = []
+    
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
+            
+        is_backbone = "backbone" in name
+        
         if "bias" in name or "bn" in name or "norm" in name or "layer_scale" in name:
-            no_decay_params.append(param)
+            if is_backbone:
+                backbone_no_decay_params.append(param)
+            else:
+                no_decay_params.append(param)
         else:
-            decay_params.append(param)
+            if is_backbone:
+                backbone_decay_params.append(param)
+            else:
+                decay_params.append(param)
 
     optimizer = torch.optim.AdamW(
         [
-            {"params": decay_params, "weight_decay": args.weight_decay},
-            {"params": no_decay_params, "weight_decay": 0.0},
+            {"params": backbone_decay_params, "weight_decay": args.weight_decay, "lr": args.lr * 0.1},
+            {"params": backbone_no_decay_params, "weight_decay": 0.0, "lr": args.lr * 0.1},
+            {"params": decay_params, "weight_decay": args.weight_decay, "lr": args.lr},
+            {"params": no_decay_params, "weight_decay": 0.0, "lr": args.lr},
         ],
         lr=args.lr,
         betas=(0.9, 0.999),

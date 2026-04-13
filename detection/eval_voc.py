@@ -201,7 +201,7 @@ def _evaluate_at_threshold(all_preds, all_gts, n_gt_per_class, num_classes, iou_
             continue
 
         # Sort predictions by score (descending)
-        preds.sort(key=lambda x: -x[1])
+        preds = sorted(preds, key=lambda x: -x[1])
 
         # Build GT lookup: image_idx -> (boxes_array, difficults_array, matched_array)
         gt_by_image = defaultdict(lambda: {"boxes": [], "difficults": [], "matched": []})

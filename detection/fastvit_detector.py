@@ -11,7 +11,7 @@ from torchvision.ops import nms
 from timm.models import create_model
 import models  # noqa: F401, registers FastViT variants
 
-from .losses import AnchorGenerator, decode_boxes
+from .losses import AnchorGenerator, decode_boxes, BOX_WEIGHTS
 
 
 class FPN(nn.Module):
@@ -320,7 +320,7 @@ class FastViTDetector(nn.Module):
             box_deltas = reg_preds[b]  # (A, 4)
 
             # Decode boxes
-            boxes = decode_boxes(box_deltas, anchors)
+            boxes = decode_boxes(box_deltas, anchors, weights=BOX_WEIGHTS)
 
             # Clip to image boundaries
             boxes[:, 0].clamp_(min=0)

@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import math
 from collections import OrderedDict
 
+BOX_WEIGHTS = (10.0, 10.0, 5.0, 5.0)
+
 
 def box_iou(boxes1, boxes2):
     """Compute IoU between two sets of boxes.
@@ -192,12 +194,13 @@ class AnchorGenerator:
         return result
 
 
-def encode_boxes(gt_boxes, anchors):
+def encode_boxes(gt_boxes, anchors, weights=BOX_WEIGHTS):
     """Encode ground truth boxes relative to anchors.
 
     Args:
         gt_boxes: (N, 4) in [x1, y1, x2, y2]
         anchors: (N, 4) in [x1, y1, x2, y2]
+        weights: (4,) weights for [tx, ty, tw, th] normalization
 
     Returns:
         deltas: (N, 4) encoded as [tx, ty, tw, th]
@@ -213,20 +216,27 @@ def encode_boxes(gt_boxes, anchors):
     g_w = gt_boxes[:, 2] - gt_boxes[:, 0]
     g_h = gt_boxes[:, 3] - gt_boxes[:, 1]
 
-    tx = (g_cx - a_cx) / a_w
-    ty = (g_cy - a_cy) / a_h
-    tw = torch.log((g_w / a_w).clamp(min=1e-7))
-    th = torch.log((g_h / a_h).clamp(min=1e-7))
+    wx, wy, ww, wh = weights
+    tx = wx * (g_cx - a_cx) / a_w
+    ty = wy * (g_cy - a_cy) / a_h
+    tw = ww * torch.log((g_w / a_w).clamp(min=1e-7))
+    th = wh * torch.log((g_h / a_h).clamp(min=1e-7))
+
+    # Clamp the targets to ensure stability
+    tw = torch.clamp(tw, min=-10.0, max=10.0)
+    th = torch.clamp(th, min=-10.0, max=10.0)
 
     return torch.stack([tx, ty, tw, th], dim=1)
 
 
-def decode_boxes(deltas, anchors):
+def decode_boxes(deltas, anchors, weights=BOX_WEIGHTS, bbox_clip=4.135):
     """Decode predicted box deltas relative to anchors.
 
     Args:
         deltas: (N, 4) encoded as [tx, ty, tw, th]
         anchors: (N, 4) in [x1, y1, x2, y2]
+        weights: (4,) weights for [tx, ty, tw, th] normalization
+        bbox_clip: max value for predicted width/height scaling
 
     Returns:
         boxes: (N, 4) in [x1, y1, x2, y2]
@@ -236,10 +246,19 @@ def decode_boxes(deltas, anchors):
     a_w = (anchors[:, 2] - anchors[:, 0]).clamp(min=1e-7)
     a_h = (anchors[:, 3] - anchors[:, 1]).clamp(min=1e-7)
 
-    pred_cx = deltas[:, 0].clamp(min=-10, max=10) * a_w + a_cx
-    pred_cy = deltas[:, 1].clamp(min=-10, max=10) * a_h + a_cy
-    pred_w = torch.exp(deltas[:, 2].clamp(max=math.log(1000.0))) * a_w
-    pred_h = torch.exp(deltas[:, 3].clamp(max=math.log(1000.0))) * a_h
+    wx, wy, ww, wh = weights
+    dx = deltas[:, 0] / wx
+    dy = deltas[:, 1] / wy
+    dw = deltas[:, 2] / ww
+    dh = deltas[:, 3] / wh
+
+    dw = torch.clamp(dw, max=bbox_clip)
+    dh = torch.clamp(dh, max=bbox_clip)
+
+    pred_cx = dx * a_w + a_cx
+    pred_cy = dy * a_h + a_cy
+    pred_w = torch.exp(dw) * a_w
+    pred_h = torch.exp(dh) * a_h
 
     x1 = pred_cx - pred_w / 2
     y1 = pred_cy - pred_h / 2
@@ -286,6 +305,9 @@ class DetectionLoss(nn.Module):
         Returns:
             loss_dict: dict with 'cls_loss' and 'reg_loss'
         """
+        cls_preds = cls_preds.float()
+        reg_preds = reg_preds.float()
+
         batch_size = cls_preds.shape[0]
         device = cls_preds.device
 
@@ -343,7 +365,7 @@ class DetectionLoss(nn.Module):
 
             # Encode regression targets (only for positive anchors)
             matched_gt = gt_boxes[max_idx[pos_mask]]
-            reg_targets_pos = encode_boxes(matched_gt, anchors[pos_mask])
+            reg_targets_pos = encode_boxes(matched_gt, anchors[pos_mask], weights=BOX_WEIGHTS)
 
             num_pos = pos_mask.sum().item()
             total_pos += num_pos
