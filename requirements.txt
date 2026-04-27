@@ -1,2 +1,26 @@
-timm
+# ============================================================
+#  Core
+# ============================================================
+torch>=2.0
+torchvision>=0.15
+timm>=0.9.0
+numpy
+Pillow
 scipy
+pyyaml
+
+# ============================================================
+#  Detection pipeline
+# ============================================================
+matplotlib          # visualization (detection/visualize.py)
+
+# ============================================================
+#  Benchmark (optional — benchmark.py)
+# ============================================================
+fvcore            # FLOPs counting (pip install fvcore)
+pynvml            # GPU energy monitoring (pip install pynvml)
+
+# ============================================================
+#  Experiment tracking (optional)
+# ============================================================
+wandb             # Weights & Biases logging
