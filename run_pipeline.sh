@@ -182,6 +182,7 @@ python benchmark.py \
     --img-size ${IMG_SIZE} \
     --batch-size 1 ${BATCH_SIZE} \
     --amp \
+    --reparam \
     --energy \
     --iterations 200 \
     --warmup 50 \

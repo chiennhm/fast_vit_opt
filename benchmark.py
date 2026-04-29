@@ -188,7 +188,7 @@ def benchmark_latency(
     dummy = torch.randn(*input_shape, device=device)
 
     # Warmup
-    with torch.no_grad():
+    with torch.inference_mode():
         for _ in range(warmup):
             if use_amp and device.type == "cuda":
                 with torch.cuda.amp.autocast():
@@ -218,7 +218,7 @@ def benchmark_latency(
         else:
             t0 = time.perf_counter()
 
-        with torch.no_grad():
+        with torch.inference_mode():
             if use_amp and device.type == "cuda":
                 with torch.cuda.amp.autocast():
                     _ = model(dummy)
@@ -266,15 +266,27 @@ def benchmark_latency(
 # Build model helper
 # ============================================================================
 def build_model(variant, mode, device, reparam=False):
-    """Build backbone or full detector model."""
+    """Build backbone or full detector model.
+
+    Args:
+        variant: FastViT variant name
+        mode: 'backbone' or 'detection'
+        device: torch device
+        reparam: if True, fuse multi-branch blocks into single-path conv
+                 (standard inference optimization for MobileOne/RepVGG)
+    """
     if mode == "detection":
         from detection.fastvit_detector import FastViTDetector
         model = FastViTDetector(model_name=variant, num_classes=20)
     else:
         model = create_model(variant, num_classes=1000)
 
-    if reparam and HAS_REPARAM and mode == "backbone":
-        model = reparameterize_model(model)
+    if reparam and HAS_REPARAM:
+        if mode == "backbone":
+            model = reparameterize_model(model)
+        else:
+            # Detection: reparameterize only the backbone sub-module
+            model.backbone = reparameterize_model(model.backbone)
 
     model = model.to(device).eval()
     return model
