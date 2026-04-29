@@ -18,7 +18,7 @@ matplotlib          # visualization (detection/visualize.py)
 #  Benchmark (optional — benchmark.py)
 # ============================================================
 fvcore            # FLOPs counting (pip install fvcore)
-pynvml            # GPU energy monitoring (pip install pynvml)
+nvidia-ml-py        # GPU energy monitoring (replaces deprecated pynvml)
 
 # ============================================================
 #  Experiment tracking (optional)

@@ -29,6 +29,10 @@ OUTPUT_DIR=./output/detection
 EVAL_INTERVAL=1
 SEED=42
 
+# Wandb
+WANDB_PROJECT="fastvit-detection"
+WANDB_NAME="${MODEL}_bs${BATCH_SIZE}_ep${EPOCHS}"
+
 # Derived
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_DIR="${OUTPUT_DIR}/${MODEL}_pipeline_${TIMESTAMP}"
@@ -48,6 +52,7 @@ echo "  Num anchors:  ${NUM_ANCHORS}"
 echo "  LR:           ${LR}"
 echo "  Data dir:     ${DATA_DIR}"
 echo "  Output dir:   ${RUN_DIR}"
+echo "  Wandb:        ${WANDB_PROJECT} / ${WANDB_NAME}"
 echo "============================================================"
 echo ""
 
@@ -118,7 +123,8 @@ python object_detection.py \
     --workers ${WORKERS} \
     --output ${RUN_DIR} \
     --eval-interval ${EVAL_INTERVAL} \
-    --no-wandb \
+    --wandb-project ${WANDB_PROJECT} \
+    --wandb-name ${WANDB_NAME} \
     --save-visualizations \
     2>&1 | tee "${RUN_DIR}/train_log.txt"
 
@@ -156,7 +162,8 @@ if [ -n "${BEST_CKPT}" ]; then
         --resume "${BEST_CKPT}" \
         --eval-only \
         --save-visualizations \
-        --no-wandb \
+        --wandb-project ${WANDB_PROJECT} \
+        --wandb-name ${WANDB_NAME}_eval \
         2>&1 | tee "${RUN_DIR}/eval_log.txt"
 else
     echo "[WARN] No checkpoint found — skipping evaluation."

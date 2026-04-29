@@ -37,7 +37,11 @@ try:
     import pynvml
     HAS_PYNVML = True
 except ImportError:
-    HAS_PYNVML = False
+    try:
+        import nvidia_smi as pynvml
+        HAS_PYNVML = True
+    except ImportError:
+        HAS_PYNVML = False
 
 try:
     from models.modules.mobileone import reparameterize_model
