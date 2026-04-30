@@ -269,7 +269,7 @@ def benchmark_latency(
 # ============================================================================
 # Build model helper
 # ============================================================================
-def build_model(variant, mode, device, reparam=False):
+def build_model(variant, mode, device, reparam=False, checkpoint=None):
     """Build backbone or full detector model.
 
     Args:
@@ -278,12 +278,20 @@ def build_model(variant, mode, device, reparam=False):
         device: torch device
         reparam: if True, fuse multi-branch blocks into single-path conv
                  (standard inference optimization for MobileOne/RepVGG)
+        checkpoint: path to .pth checkpoint to load weights from
     """
     if mode == "detection":
         from detection.fastvit_detector import FastViTDetector
         model = FastViTDetector(model_name=variant, num_classes=20)
     else:
         model = create_model(variant, num_classes=1000)
+
+    # Load checkpoint weights if provided
+    if checkpoint is not None:
+        ckpt = torch.load(checkpoint, map_location="cpu")
+        state_dict = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
+        model.load_state_dict(state_dict, strict=False)
+        print(f"    Loaded checkpoint: {checkpoint}")
 
     if reparam and HAS_REPARAM:
         if mode == "backbone":
@@ -414,6 +422,10 @@ def main():
     parser.add_argument("--energy", action="store_true", help="Enable GPU energy monitoring (requires pynvml)")
     parser.add_argument("--output", type=str, default="./output/benchmark", help="Output directory")
     parser.add_argument("--no-save", action="store_true", help="Don't save results to files")
+    parser.add_argument(
+        "--checkpoint", type=str, default=None,
+        help="Path to .pth checkpoint to load weights from (use with --model variant_name)",
+    )
 
     args = parser.parse_args()
 
@@ -452,7 +464,10 @@ def main():
                 print(f"\n>>> {tag}")
 
                 try:
-                    model = build_model(variant, args.mode, device, reparam=args.reparam)
+                    model = build_model(
+                        variant, args.mode, device,
+                        reparam=args.reparam, checkpoint=args.checkpoint,
+                    )
 
                     # FLOPs / params (always batch=1)
                     flop_input = torch.randn(1, 3, img_size, img_size, device=device)
@@ -511,7 +526,8 @@ def main():
                 finally:
                     # Free GPU memory
                     if device.type == "cuda":
-                        del model
+                        if 'model' in dir():
+                            del model
                         torch.cuda.empty_cache()
 
     # Print summary table
