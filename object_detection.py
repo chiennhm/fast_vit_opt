@@ -332,7 +332,7 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
 # ============================================================================
 # Evaluation
 # ============================================================================
-@torch.no_grad()
+@torch.inference_mode()
 def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
     """Evaluate model on validation set."""
     model.eval()
@@ -340,16 +340,24 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
     all_predictions = []
     all_ground_truths = []
 
+    use_amp = args.amp and device.type == "cuda"
+
     logger.info("Running evaluation...")
     start_time = time.time()
 
     for batch_idx, (images, targets) in enumerate(dataloader):
         images = images.to(device, non_blocking=True)
 
-        # Get predictions
-        predictions = model.predict(
-            images, score_thresh=0.01, nms_thresh=0.5, max_detections=200
-        )
+        # Get predictions (use AMP for faster inference)
+        if use_amp:
+            with autocast('cuda'):
+                predictions = model.predict(
+                    images, score_thresh=0.05, nms_thresh=0.5, max_detections=200
+                )
+        else:
+            predictions = model.predict(
+                images, score_thresh=0.05, nms_thresh=0.5, max_detections=200
+            )
 
         all_predictions.extend(predictions)
         all_ground_truths.extend(targets)

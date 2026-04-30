@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from torchvision.ops import nms
+from torchvision.ops import nms, batched_nms
 
 from timm.models import create_model
 import models  # noqa: F401, registers FastViT variants
@@ -290,7 +290,7 @@ class FastViTDetector(nn.Module):
 
         return cls_preds, reg_preds, anchors
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def predict(
         self,
         images,
@@ -313,70 +313,70 @@ class FastViTDetector(nn.Module):
         cls_preds, reg_preds, anchors = self.forward(images)
 
         batch_size = cls_preds.shape[0]
+        img_h, img_w = images.shape[2], images.shape[3]
         results = []
 
         for b in range(batch_size):
             scores = torch.sigmoid(cls_preds[b])  # (A, C)
             box_deltas = reg_preds[b]  # (A, 4)
 
+            # --- Pre-filter: keep only anchors whose max class score > threshold ---
+            max_scores, _ = scores.max(dim=1)  # (A,)
+            candidate_mask = max_scores > score_thresh
+            if not candidate_mask.any():
+                results.append({
+                    "boxes": torch.zeros((0, 4), device=images.device),
+                    "scores": torch.zeros((0,), device=images.device),
+                    "labels": torch.zeros((0,), dtype=torch.long, device=images.device),
+                })
+                continue
+
+            scores = scores[candidate_mask]       # (K, C)
+            box_deltas = box_deltas[candidate_mask]  # (K, 4)
+            cand_anchors = anchors[candidate_mask]   # (K, 4)
+
             # Decode boxes
-            boxes = decode_boxes(box_deltas, anchors, weights=BOX_WEIGHTS)
+            boxes = decode_boxes(box_deltas, cand_anchors, weights=BOX_WEIGHTS)
 
             # Clip to image boundaries
             boxes[:, 0].clamp_(min=0)
             boxes[:, 1].clamp_(min=0)
-            boxes[:, 2].clamp_(max=images.shape[3])
-            boxes[:, 3].clamp_(max=images.shape[2])
+            boxes[:, 2].clamp_(max=img_w)
+            boxes[:, 3].clamp_(max=img_h)
 
-            all_boxes = []
-            all_scores = []
-            all_labels = []
+            # --- Flatten to (K*C) for batched NMS ---
+            K, C = scores.shape
+            # Expand boxes: each anchor has C copies (one per class)
+            flat_boxes = boxes.unsqueeze(1).expand(K, C, 4).reshape(-1, 4)    # (K*C, 4)
+            flat_scores = scores.reshape(-1)                                   # (K*C,)
+            flat_labels = torch.arange(C, device=scores.device).unsqueeze(0).expand(K, C).reshape(-1) + 1  # 1-indexed
 
-            for cls_idx in range(self.num_classes):
-                cls_scores = scores[:, cls_idx]
-                keep = cls_scores > score_thresh
-                if not keep.any():
-                    continue
+            # Per-class score filter
+            keep = flat_scores > score_thresh
+            flat_boxes = flat_boxes[keep]
+            flat_scores = flat_scores[keep]
+            flat_labels = flat_labels[keep]
 
-                cls_scores = cls_scores[keep]
-                cls_boxes = boxes[keep]
+            if len(flat_scores) == 0:
+                results.append({
+                    "boxes": torch.zeros((0, 4), device=images.device),
+                    "scores": torch.zeros((0,), device=images.device),
+                    "labels": torch.zeros((0,), dtype=torch.long, device=images.device),
+                })
+                continue
 
-                # NMS
+            # Batched NMS (uses label as class offset — single call replaces 20 per-class loops)
+            keep_idx = batched_nms(flat_boxes, flat_scores, flat_labels, nms_thresh)
 
-                keep_idx = nms(cls_boxes, cls_scores, nms_thresh)
-                all_boxes.append(cls_boxes[keep_idx])
-                all_scores.append(cls_scores[keep_idx])
-                all_labels.append(
-                    torch.full(
-                        (len(keep_idx),),
-                        cls_idx + 1,  # 1-indexed labels
-                        dtype=torch.long,
-                        device=images.device,
-                    )
-                )
+            # Top-k
+            if len(keep_idx) > max_detections:
+                keep_idx = keep_idx[:max_detections]
 
-            if len(all_boxes) > 0:
-                all_boxes = torch.cat(all_boxes, dim=0)
-                all_scores = torch.cat(all_scores, dim=0)
-                all_labels = torch.cat(all_labels, dim=0)
-
-                # Keep top-k detections
-                if len(all_scores) > max_detections:
-                    topk = all_scores.topk(max_detections).indices
-                    all_boxes = all_boxes[topk]
-                    all_scores = all_scores[topk]
-                    all_labels = all_labels[topk]
-            else:
-                all_boxes = torch.zeros((0, 4), device=images.device)
-                all_scores = torch.zeros((0,), device=images.device)
-                all_labels = torch.zeros((0,), dtype=torch.long, device=images.device)
-
-            results.append(
-                {
-                    "boxes": all_boxes,
-                    "scores": all_scores,
-                    "labels": all_labels,
-                }
-            )
+            results.append({
+                "boxes": flat_boxes[keep_idx],
+                "scores": flat_scores[keep_idx],
+                "labels": flat_labels[keep_idx],
+            })
 
         return results
+
