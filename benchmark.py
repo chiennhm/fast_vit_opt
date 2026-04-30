@@ -309,7 +309,7 @@ def get_system_info(device):
     if device.type == "cuda":
         info["gpu_name"] = torch.cuda.get_device_name(device)
         props = torch.cuda.get_device_properties(device)
-        info["gpu_memory_GB"] = round(props.total_mem / 1e9, 2)
+        info["gpu_memory_GB"] = round(props.total_memory / 1e9, 2)
         info["cuda_version"] = torch.version.cuda or "N/A"
         info["cudnn_version"] = str(torch.backends.cudnn.version())
     return info
