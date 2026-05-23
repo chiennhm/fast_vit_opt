@@ -28,12 +28,15 @@ try:
 except ImportError:
     HAS_WANDB = False
 
+import numpy as np
+
 # Project imports
 from detection.fastvit_detector import FastViTDetector
 from detection.losses import DetectionLoss
 from detection.eval_voc import evaluate_voc, print_eval_results
 from detection.visualize import save_detection_results, VOC_CLASSES
 from voc_dataset import build_voc_datasets, detection_collate
+from coco_dataset import build_coco_datasets, coco_collate, COCO_CLASSES
 
 
 # ============================================================================
@@ -57,8 +60,28 @@ def parse_args():
 
     # Data
     parser.add_argument(
+        "--dataset", type=str, default="voc", choices=["voc", "coco"],
+        help="Dataset to use for training/evaluation: voc or coco (default: voc)"
+    )
+    parser.add_argument(
         "--data-dir", type=str, default="./data",
-        help="Root directory for VOC dataset (default: ./data)"
+        help="Root directory for VOC/COCO dataset (default: ./data)"
+    )
+    parser.add_argument(
+        "--coco-train-img", type=str, default=None,
+        help="Custom path to COCO train images directory"
+    )
+    parser.add_argument(
+        "--coco-train-ann", type=str, default=None,
+        help="Custom path to COCO train annotations JSON file"
+    )
+    parser.add_argument(
+        "--coco-val-img", type=str, default=None,
+        help="Custom path to COCO validation images directory"
+    )
+    parser.add_argument(
+        "--coco-val-ann", type=str, default=None,
+        help="Custom path to COCO validation annotations JSON file"
     )
     parser.add_argument(
         "--img-size", type=int, default=512,
@@ -365,11 +388,12 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
         # Save visualizations for first few batches
         if save_vis and output_dir and batch_idx < 5:
             vis_dir = os.path.join(output_dir, "visualizations")
+            class_names = COCO_CLASSES if args.dataset == "coco" else VOC_CLASSES
             save_detection_results(
                 images,
                 predictions,
                 vis_dir,
-                class_names=VOC_CLASSES,
+                class_names=class_names,
                 score_thresh=0.3,
             )
 
@@ -379,13 +403,22 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
     elapsed = time.time() - start_time
     logger.info(f"Evaluation completed in {elapsed:.1f}s")
 
-    # Compute VOC mAP
+    # Compute mAP
+    if args.dataset == "coco":
+        num_classes = 80
+        class_names = COCO_CLASSES
+        iou_threshold = np.linspace(0.5, 0.95, 10).tolist()
+    else:
+        num_classes = 20
+        class_names = VOC_CLASSES
+        iou_threshold = 0.5
+
     results = evaluate_voc(
         all_predictions,
         all_ground_truths,
-        num_classes=20,
-        iou_threshold=0.5,
-        class_names=VOC_CLASSES,
+        num_classes=num_classes,
+        iou_threshold=iou_threshold,
+        class_names=class_names,
     )
 
     return results
@@ -467,21 +500,34 @@ def main():
         wandb.define_metric("eval/*", step_metric="epoch")
 
     # ========================================================================
+    # ========================================================================
     # Datasets
     # ========================================================================
     logger.info("Building datasets...")
-    train_dataset, val_dataset = build_voc_datasets(
-        data_dir=args.data_dir,
-        img_size=args.img_size,
-        download=not args.no_download,
-    )
+    if args.dataset == "coco":
+        train_dataset, val_dataset = build_coco_datasets(
+            data_dir=args.data_dir,
+            img_size=args.img_size,
+            train_img_dir=args.coco_train_img,
+            train_ann_file=args.coco_train_ann,
+            val_img_dir=args.coco_val_img,
+            val_ann_file=args.coco_val_ann,
+        )
+        collate_fn = coco_collate
+    else:
+        train_dataset, val_dataset = build_voc_datasets(
+            data_dir=args.data_dir,
+            img_size=args.img_size,
+            download=not args.no_download,
+        )
+        collate_fn = detection_collate
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.workers,
-        collate_fn=detection_collate,
+        collate_fn=collate_fn,
         pin_memory=True,
         drop_last=True,
     )
@@ -491,7 +537,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.workers,
-        collate_fn=detection_collate,
+        collate_fn=collate_fn,
         pin_memory=True,
     )
 
@@ -502,9 +548,10 @@ def main():
     # Model
     # ========================================================================
     logger.info(f"Building model: {args.model}")
+    num_classes = 80 if args.dataset == "coco" else 20
     model = FastViTDetector(
         model_name=args.model,
-        num_classes=20,
+        num_classes=num_classes,
         fpn_channels=args.fpn_channels,
         pretrained_backbone=args.pretrained_backbone,
     )
@@ -524,7 +571,7 @@ def main():
     # Loss, Optimizer, Scheduler
     # ========================================================================
     criterion = DetectionLoss(
-        num_classes=20,
+        num_classes=num_classes,
         alpha=args.focal_alpha,
         gamma=args.focal_gamma,
     )

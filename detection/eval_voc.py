@@ -271,7 +271,10 @@ def print_eval_results(results, logger_fn=None):
 
     lines = []
     lines.append(f"\n{'='*60}")
-    lines.append(f"  VOC mAP@0.5 = {results['mAP']*100:.2f}%")
+    if "mAP_per_threshold" in results:
+        lines.append(f"  mAP@[0.5:0.95] = {results['mAP']*100:.2f}%")
+    else:
+        lines.append(f"  mAP@0.5 = {results['mAP']*100:.2f}%")
     lines.append(f"{'='*60}")
     lines.append(f"  {'Class':<20} {'AP':>10}")
     lines.append(f"  {'-'*30}")

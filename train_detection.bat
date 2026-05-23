@@ -1,12 +1,13 @@
 @echo off
 REM ============================================================
-REM  FastViT Object Detection - Training Script (PASCAL VOC)
+REM  FastViT Object Detection - Training Script (PASCAL VOC / COCO)
 REM ============================================================
 REM
 REM  Usage:
-REM    train_detection.bat                    (default: fastvit_sa12)
+REM    train_detection.bat                    (default: fastvit_sa12, voc)
 REM    train_detection.bat fastvit_t8         (use lighter model)
 REM    train_detection.bat fastvit_sa12 8     (custom batch size)
+REM    train_detection.bat fastvit_sa12 8 coco (train on COCO dataset)
 REM
 REM  VOC dataset will be auto-downloaded on first run (~2GB)
 REM ============================================================
@@ -20,11 +21,19 @@ if "%MODEL%"=="" set MODEL=fastvit_sa12
 set BATCH_SIZE=%2
 if "%BATCH_SIZE%"=="" set BATCH_SIZE=8
 
+set DATASET=%3
+if "%DATASET%"=="" set DATASET=voc
+
+if "%DATASET%"=="coco" (
+    set DATA_DIR=./data/coco
+) else (
+    set DATA_DIR=./data
+)
+
 set IMG_SIZE=512
 set EPOCHS=150
 set LR=0.001
 set WORKERS=4
-set DATA_DIR=./data
 set OUTPUT_DIR=./output/detection
 set EVAL_INTERVAL=5
 
@@ -44,6 +53,7 @@ echo.
 
 REM --- Run training ---
 python object_detection.py ^
+    --dataset %DATASET% ^
     --data-dir %DATA_DIR% ^
     --model %MODEL% ^
     --batch-size %BATCH_SIZE% ^
