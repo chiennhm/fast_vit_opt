@@ -4,6 +4,7 @@
 #
 import os
 import copy
+import warnings
 from functools import partial
 from typing import List, Tuple, Optional, Union
 
@@ -12,7 +13,18 @@ import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.models.layers import DropPath, trunc_normal_
-from timm.models.registry import register_model
+
+# Suppress "Overwriting fastvit_* in registry" warnings that occur when a
+# newer version of timm already ships built-in FastViT variants.
+# Our local implementation intentionally overrides them with the
+# Apple-original weights and structural-reparameterisation support.
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message="Overwriting fastvit",
+        category=UserWarning,
+    )
+    from timm.models.registry import register_model
 
 from models.modules.mobileone import MobileOneBlock
 from models.modules.replknet import ReparamLargeKernelConv

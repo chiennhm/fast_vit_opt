@@ -1,5 +1,5 @@
 #
-# MS-COCO Dataset for Object Detection (pure Python parser)
+# MS-COCO Dataset for Object Detection / Instance Segmentation
 #
 
 import os
@@ -11,6 +11,13 @@ from PIL import Image
 import numpy as np
 import random
 from collections import defaultdict
+
+# pycocotools is optional — used only for RLE mask decoding.
+try:
+    from pycocotools import mask as coco_mask_utils
+    HAS_PYCOCOTOOLS = True
+except ImportError:
+    HAS_PYCOCOTOOLS = False
 
 
 COCO_CLASSES = [
@@ -80,25 +87,88 @@ class COCODetectionDataset(Dataset):
     def __len__(self):
         return len(self.img_ids)
 
-    def _get_annotations(self, img_id):
+    def _decode_mask(self, ann, img_h, img_w):
+        """Decode a COCO segmentation annotation into a binary mask (H, W) uint8.
+
+        Supports:
+          - polygon format (list of [x1,y1,x2,y2,...] polygons)
+          - RLE format (requires pycocotools; falls back to bbox mask)
+        """
+        seg = ann.get("segmentation", None)
+
+        if seg is None or (isinstance(seg, list) and len(seg) == 0):
+            # No segmentation — fall back to bounding-box mask
+            bbox = ann["bbox"]
+            mask = np.zeros((img_h, img_w), dtype=np.uint8)
+            x1 = max(0, int(bbox[0]))
+            y1 = max(0, int(bbox[1]))
+            x2 = min(img_w, int(bbox[0] + bbox[2]))
+            y2 = min(img_h, int(bbox[1] + bbox[3]))
+            mask[y1:y2, x1:x2] = 1
+            return mask
+
+        if isinstance(seg, list):
+            # Polygon format — rasterise with numpy
+            mask = np.zeros((img_h, img_w), dtype=np.uint8)
+            try:
+                import cv2
+                for poly in seg:
+                    pts = np.array(poly, dtype=np.float32).reshape(-1, 2)
+                    pts = pts.astype(np.int32)
+                    cv2.fillPoly(mask, [pts], 1)
+            except ImportError:
+                # cv2 not available — use PIL ImageDraw fallback
+                from PIL import ImageDraw
+                m_img = Image.fromarray(mask)
+                draw = ImageDraw.Draw(m_img)
+                for poly in seg:
+                    pts = list(zip(poly[0::2], poly[1::2]))
+                    if len(pts) >= 3:
+                        draw.polygon(pts, fill=1)
+                mask = np.array(m_img, dtype=np.uint8)
+            return mask
+
+        # RLE format (dict with 'counts' and 'size')
+        if isinstance(seg, dict):
+            if HAS_PYCOCOTOOLS:
+                rle = coco_mask_utils.frPyObjects(
+                    seg, seg["size"][0], seg["size"][1]
+                )
+                return coco_mask_utils.decode(rle).astype(np.uint8)
+            else:
+                # Fallback: bbox mask
+                bbox = ann["bbox"]
+                mask = np.zeros((img_h, img_w), dtype=np.uint8)
+                x1 = max(0, int(bbox[0]))
+                y1 = max(0, int(bbox[1]))
+                x2 = min(img_w, int(bbox[0] + bbox[2]))
+                y2 = min(img_h, int(bbox[1] + bbox[3]))
+                mask[y1:y2, x1:x2] = 1
+                return mask
+
+        return np.zeros((img_h, img_w), dtype=np.uint8)
+
+    def _get_annotations(self, img_id, img_h, img_w):
         """Retrieve annotations for a given image ID.
 
         Returns:
-            boxes: list of [x1, y1, x2, y2]
-            labels: list of class indices (1-indexed)
-            difficults: list of bools (mapped from iscrowd)
+            boxes:     list of [x1, y1, x2, y2]
+            labels:    list of class indices (1-indexed)
+            difficults: list of bools (iscrowd)
+            masks:     list of binary np.ndarray (H, W) uint8
         """
         anns = self.img_to_anns[img_id]
         boxes = []
         labels = []
         difficults = []
+        masks = []
 
         for ann in anns:
             cat_id = ann["category_id"]
             if cat_id not in COCO_CAT_TO_IDX:
                 continue
 
-            # Convert bbox [x, y, w, h] to [x1, y1, x2, y2]
+            # Convert bbox [x, y, w, h] → [x1, y1, x2, y2]
             bbox = ann["bbox"]
             x1 = float(bbox[0])
             y1 = float(bbox[1])
@@ -111,8 +181,9 @@ class COCODetectionDataset(Dataset):
             boxes.append([x1, y1, x2, y2])
             labels.append(COCO_CAT_TO_IDX[cat_id])
             difficults.append(is_difficult)
+            masks.append(self._decode_mask(ann, img_h, img_w))
 
-        return boxes, labels, difficults
+        return boxes, labels, difficults, masks
 
     def __getitem__(self, idx):
         img_id = self.img_ids[idx]
@@ -122,54 +193,69 @@ class COCODetectionDataset(Dataset):
 
         # Load image
         image = Image.open(img_path).convert("RGB")
+        orig_w, orig_h = image.size
 
-        # Get annotations
-        boxes, labels, difficults = self._get_annotations(img_id)
+        # Get annotations (with segmentation masks)
+        boxes, labels, difficults, masks = self._get_annotations(
+            img_id, img_h=orig_h, img_w=orig_w
+        )
 
         if len(boxes) == 0:
-            boxes = np.zeros((0, 4), dtype=np.float32)
-            labels = np.array([], dtype=np.int64)
-            difficults = np.array([], dtype=bool)
+            boxes      = np.zeros((0, 4),         dtype=np.float32)
+            labels     = np.array([],             dtype=np.int64)
+            difficults = np.array([],             dtype=bool)
+            masks      = np.zeros((0, orig_h, orig_w), dtype=np.uint8)
         else:
-            boxes = np.array(boxes, dtype=np.float32)
-            labels = np.array(labels, dtype=np.int64)
+            boxes      = np.array(boxes,      dtype=np.float32)
+            labels     = np.array(labels,     dtype=np.int64)
             difficults = np.array(difficults, dtype=bool)
+            masks      = np.stack(masks, axis=0)  # (N, H, W)
 
         if self.augment:
-            # For training: exclude difficult (iscrowd) objects from augmentation & targets
-            easy_mask = ~difficults
-            train_boxes = boxes[easy_mask] if easy_mask.any() else np.zeros((0, 4), dtype=np.float32)
+            # Training: exclude iscrowd objects
+            easy_mask    = ~difficults
+            train_boxes  = boxes[easy_mask]  if easy_mask.any() else np.zeros((0, 4), dtype=np.float32)
             train_labels = labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
+            train_masks  = masks[easy_mask]  if easy_mask.any() else np.zeros((0, orig_h, orig_w), dtype=np.uint8)
 
             if len(train_boxes) > 0:
-                image, train_boxes = self._augment(image, train_boxes)
+                image, train_boxes, train_masks = self._augment(
+                    image, train_boxes, train_masks
+                )
 
-            image, train_boxes = self._resize(image, train_boxes, self.img_size)
+            image, train_boxes, train_masks = self._resize(
+                image, train_boxes, self.img_size, train_masks
+            )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
 
             targets = {
-                "boxes": torch.tensor(train_boxes, dtype=torch.float32),
+                "boxes":  torch.tensor(train_boxes,  dtype=torch.float32),
                 "labels": torch.tensor(train_labels, dtype=torch.int64),
+                # torchvision MaskRCNN expects BoolTensor masks (N, H, W)
+                "masks":  torch.tensor(train_masks,  dtype=torch.bool),
             }
         else:
-            # For eval: keep all objects, pass difficult flag
-            image, boxes = self._resize(image, boxes, self.img_size)
+            # Eval: keep all, include difficult flag
+            image, boxes, masks = self._resize(
+                image, boxes, self.img_size, masks
+            )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
 
             targets = {
-                "boxes": torch.tensor(boxes, dtype=torch.float32),
-                "labels": torch.tensor(labels, dtype=torch.int64),
+                "boxes":      torch.tensor(boxes,      dtype=torch.float32),
+                "labels":     torch.tensor(labels,     dtype=torch.int64),
+                "masks":      torch.tensor(masks,      dtype=torch.bool),
                 "difficults": torch.tensor(difficults, dtype=torch.bool),
             }
 
         return image, targets
 
-    def _augment(self, image, boxes):
-        """Apply detection-safe augmentations."""
+    def _augment(self, image, boxes, masks):
+        """Apply detection-safe augmentations to image, boxes, and masks."""
         w, h = image.size
 
         # Random horizontal flip
@@ -179,8 +265,10 @@ class COCODetectionDataset(Dataset):
             new_boxes[:, 0] = w - boxes[:, 2]
             new_boxes[:, 2] = w - boxes[:, 0]
             boxes = new_boxes
+            if len(masks) > 0:
+                masks = masks[:, :, ::-1].copy()  # flip each mask horizontally
 
-        # Random color jitter
+        # Random color jitter (image only)
         if random.random() > 0.5:
             image = TF.adjust_brightness(image, random.uniform(0.8, 1.2))
         if random.random() > 0.5:
@@ -196,7 +284,7 @@ class COCODetectionDataset(Dataset):
             new_w = int(w * ratio)
             new_h = int(h * ratio)
             left = random.randint(0, new_w - w)
-            top = random.randint(0, new_h - h)
+            top  = random.randint(0, new_h - h)
 
             expanded = Image.new("RGB", (new_w, new_h),
                                   (int(0.485 * 255), int(0.456 * 255), int(0.406 * 255)))
@@ -209,56 +297,65 @@ class COCODetectionDataset(Dataset):
             boxes[:, 2] += left
             boxes[:, 3] += top
 
+            if len(masks) > 0:
+                new_masks = np.zeros(
+                    (masks.shape[0], new_h, new_w), dtype=masks.dtype
+                )
+                new_masks[:, top:top + h, left:left + w] = masks
+                masks = new_masks
+
         # Random crop (IoU-aware)
         if random.random() > 0.5:
-            image, boxes = self._random_crop(image, boxes)
+            image, boxes, masks = self._random_crop(image, boxes, masks)
 
-        return image, boxes
+        return image, boxes, masks
 
-    def _random_crop(self, image, boxes):
+    def _random_crop(self, image, boxes, masks):
         """Random crop ensuring at least one box center remains."""
         w, h = image.size
         if len(boxes) == 0:
-            return image, boxes
+            return image, boxes, masks
 
         for _ in range(50):  # Max attempts
-            min_scale = 0.5
-            scale = random.uniform(min_scale, 1.0)
+            scale  = random.uniform(0.5, 1.0)
             crop_h = int(h * scale)
             crop_w = int(w * scale)
-
-            left = random.randint(0, max(w - crop_w, 0))
-            top = random.randint(0, max(h - crop_h, 0))
-            right = left + crop_w
+            left   = random.randint(0, max(w - crop_w, 0))
+            top    = random.randint(0, max(h - crop_h, 0))
+            right  = left + crop_w
             bottom = top + crop_h
 
             # Check if any box center is inside crop
             cx = (boxes[:, 0] + boxes[:, 2]) / 2
             cy = (boxes[:, 1] + boxes[:, 3]) / 2
-            mask = (cx >= left) & (cx <= right) & (cy >= top) & (cy <= bottom)
+            keep = (cx >= left) & (cx <= right) & (cy >= top) & (cy <= bottom)
 
-            if not mask.any():
+            if not keep.any():
                 continue
 
             image = image.crop((left, top, right, bottom))
 
             # Adjust boxes
-            new_boxes = boxes[mask].copy()
+            new_boxes = boxes[keep].copy()
             new_boxes[:, 0] = np.clip(new_boxes[:, 0] - left, 0, crop_w)
-            new_boxes[:, 1] = np.clip(new_boxes[:, 1] - top, 0, crop_h)
+            new_boxes[:, 1] = np.clip(new_boxes[:, 1] - top,  0, crop_h)
             new_boxes[:, 2] = np.clip(new_boxes[:, 2] - left, 0, crop_w)
-            new_boxes[:, 3] = np.clip(new_boxes[:, 3] - top, 0, crop_h)
+            new_boxes[:, 3] = np.clip(new_boxes[:, 3] - top,  0, crop_h)
 
-            # Filter out boxes that are too small
-            valid = (new_boxes[:, 2] - new_boxes[:, 0] > 5) & \
-                    (new_boxes[:, 3] - new_boxes[:, 1] > 5)
+            # Crop masks
+            new_masks = masks[keep, top:bottom, left:right].copy() \
+                if len(masks) > 0 else masks[keep]
+
+            # Filter tiny boxes
+            valid = ((new_boxes[:, 2] - new_boxes[:, 0]) > 5) & \
+                    ((new_boxes[:, 3] - new_boxes[:, 1]) > 5)
             if valid.any():
-                return image, new_boxes[valid]
+                return image, new_boxes[valid], new_masks[valid]
 
-        return image, boxes
+        return image, boxes, masks
 
-    def _resize(self, image, boxes, target_size):
-        """Resize image and scale boxes accordingly."""
+    def _resize(self, image, boxes, target_size, masks=None):
+        """Resize image, boxes, and masks to target_size × target_size."""
         orig_w, orig_h = image.size
 
         image = image.resize((target_size, target_size), Image.BILINEAR)
@@ -272,6 +369,20 @@ class COCODetectionDataset(Dataset):
             boxes[:, 2] *= scale_x
             boxes[:, 3] *= scale_y
 
+        if masks is not None and len(masks) > 0:
+            # Resize each mask using nearest-neighbour to preserve binary values
+            resized = np.zeros(
+                (masks.shape[0], target_size, target_size), dtype=masks.dtype
+            )
+            for i, m in enumerate(masks):
+                pil_m = Image.fromarray(m).resize(
+                    (target_size, target_size), Image.NEAREST
+                )
+                resized[i] = np.array(pil_m, dtype=masks.dtype)
+            masks = resized
+
+        if masks is not None:
+            return image, boxes, masks
         return image, boxes
 
 
