@@ -45,19 +45,33 @@ class FastViTBackbone(nn.Module):
     ``OrderedDict[str, Tensor]``.  FastViT with fork_feat=True returns a
     plain list of 4 tensors — this class bridges that gap.
 
-    Feature map spatial resolutions (for 512×512 input, SA12):
-        '0'  → (B, 64,  128, 128)   stride 4
+    Feature map spatial resolutions (for 512×512 input, SA12/S12):
+        '0'  → (B,  64, 128, 128)   stride 4
         '1'  → (B, 128,  64,  64)   stride 8
         '2'  → (B, 256,  32,  32)   stride 16
         '3'  → (B, 512,  16,  16)   stride 32
+
+    Args:
+        model_name: timm model name, e.g. ``'fastvit_sa12'``.
+        inference_mode: If True, build the backbone with reparameterised
+            (fused) convolutions so that a ``*_reparam.pth`` checkpoint can
+            be loaded directly.  Default: ``False``.
     """
 
-    # Channel dims per stage for FastViT-SA12
+    # Channel dims per stage for SA12 / S12 / T12 variants
     OUT_CHANNELS = [64, 128, 256, 512]
 
-    def __init__(self, model_name: str = "fastvit_sa12"):
+    def __init__(
+        self,
+        model_name: str = "fastvit_sa12",
+        inference_mode: bool = False,
+    ):
         super().__init__()
-        self.body = create_model(model_name, fork_feat=True)
+        self.body = create_model(
+            model_name,
+            fork_feat=True,
+            inference_mode=inference_mode,
+        )
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         features: List[torch.Tensor] = self.body(x)
@@ -74,7 +88,7 @@ class FastViTBackbone(nn.Module):
 # ============================================================================
 
 class FastViTWithFPN(nn.Module):
-    """FastViT-SA12 backbone fused with a torchvision FeaturePyramidNetwork.
+    """FastViT backbone fused with a torchvision FeaturePyramidNetwork.
 
     The combined module satisfies the torchvision MaskRCNN backbone contract:
         - ``out_channels`` attribute (int)
@@ -87,10 +101,11 @@ class FastViTWithFPN(nn.Module):
         self,
         model_name: str = "fastvit_sa12",
         fpn_out_channels: int = 256,
+        inference_mode: bool = False,
     ):
         super().__init__()
 
-        self.backbone = FastViTBackbone(model_name)
+        self.backbone = FastViTBackbone(model_name, inference_mode=inference_mode)
 
         in_channels_list = FastViTBackbone.OUT_CHANNELS  # [64, 128, 256, 512]
         self.fpn = FeaturePyramidNetwork(
@@ -147,10 +162,23 @@ class FastViTMaskRCNN(nn.Module):
     ):
         super().__init__()
 
+        # ── Detect checkpoint format BEFORE building backbone ─────────────
+        # A reparameterized checkpoint has fused conv keys (``reparam_conv``).
+        # An inference-mode backbone must be built to match those key names.
+        inference_mode = False
+        if pretrained_backbone is not None:
+            inference_mode = FastViTMaskRCNN._is_reparam_checkpoint(pretrained_backbone)
+            if inference_mode:
+                print(
+                    "[MaskRCNN] Reparameterized checkpoint detected → "
+                    "building backbone in inference_mode=True"
+                )
+
         # ── Backbone + FPN ────────────────────────────────────────────────
         backbone_with_fpn = FastViTWithFPN(
             model_name="fastvit_sa12",
             fpn_out_channels=fpn_out_channels,
+            inference_mode=inference_mode,
         )
 
         # ── Load ImageNet pretrained weights ──────────────────────────────
@@ -158,21 +186,17 @@ class FastViTMaskRCNN(nn.Module):
             self._load_pretrained(backbone_with_fpn.backbone.body, pretrained_backbone)
 
         # ── RPN Anchor Generator ──────────────────────────────────────────
-        # FPN outputs 5 levels (backbone 4 + MaxPool 1).
-        # Anchor sizes are chosen to cover small → large objects.
         anchor_generator = AnchorGenerator(
             sizes=((32,), (64,), (128,), (256,), (512,)),
             aspect_ratios=((0.5, 1.0, 2.0),) * 5,
         )
 
-        # ── RoI Align pool output size ────────────────────────────────────
+        # ── RoI Align pool output sizes ───────────────────────────────────
         roi_pooler = torchvision.ops.MultiScaleRoIAlign(
             featmap_names=["0", "1", "2", "3"],
             output_size=7,
             sampling_ratio=2,
         )
-
-        # Mask RoI Align
         mask_roi_pooler = torchvision.ops.MultiScaleRoIAlign(
             featmap_names=["0", "1", "2", "3"],
             output_size=14,
@@ -198,15 +222,35 @@ class FastViTMaskRCNN(nn.Module):
     # ──────────────────────────────────────────────────────────────────────
 
     @staticmethod
+    def _is_reparam_checkpoint(ckpt_path: str) -> bool:
+        """Return True if the checkpoint was saved in reparameterized (inference) mode.
+
+        Reparameterized checkpoints have fused convolution keys that contain
+        the substring ``reparam_conv``, which is absent in training-mode ones.
+        """
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            sd = (
+                ckpt.get("state_dict")
+                or ckpt.get("model")
+                or ckpt
+            )
+            return any("reparam_conv" in k for k in sd.keys())
+        except Exception:
+            return False
+
+    @staticmethod
     def _load_pretrained(backbone_model: nn.Module, ckpt_path: str) -> None:
         """Load ImageNet pretrained weights into the FastViT body.
 
-        Handles common checkpoint formats:
+        Handles checkpoint formats:
           - Plain state_dict
           - {'state_dict': ...}
           - {'model': ...}
 
-        Mismatched keys (e.g. classifier head) are silently skipped.
+        Works with both training-mode and reparameterized checkpoints.
+        Keys that don't exist in the backbone or have mismatched shapes are
+        silently skipped (e.g. classifier head, different model variant).
         """
         print(f"[MaskRCNN] Loading pretrained backbone from: {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -219,19 +263,38 @@ class FastViTMaskRCNN(nn.Module):
             state_dict = checkpoint
 
         model_state = backbone_model.state_dict()
+        total_keys  = len(model_state)
 
-        # Filter: keep only keys that exist in backbone with matching shapes
-        filtered = {
+        # Exact match: key name + shape both agree
+        exact = {
             k: v
             for k, v in state_dict.items()
             if k in model_state and v.shape == model_state[k].shape
         }
 
-        missing, unexpected = backbone_model.load_state_dict(filtered, strict=False)
+        missing, unexpected = backbone_model.load_state_dict(exact, strict=False)
+
+        # Diagnostic
+        reparam_keys_ckpt  = sum(1 for k in state_dict  if "reparam_conv" in k)
+        reparam_keys_model = sum(1 for k in model_state if "reparam_conv" in k)
         print(
-            f"[MaskRCNN] Loaded {len(filtered)}/{len(model_state)} backbone keys "
+            f"[MaskRCNN] Checkpoint: {len(state_dict)} keys "
+            f"({'reparam' if reparam_keys_ckpt else 'training'} mode)"
+        )
+        print(
+            f"[MaskRCNN] Backbone  : {total_keys} keys "
+            f"({'reparam' if reparam_keys_model else 'training'} mode)"
+        )
+        print(
+            f"[MaskRCNN] Loaded {len(exact)}/{total_keys} backbone keys "
             f"({len(missing)} missing, {len(unexpected)} unexpected)"
         )
+        if len(exact) < total_keys * 0.5:
+            print(
+                "[MaskRCNN] WARNING: Less than 50% of backbone keys loaded. "
+                "Check that the checkpoint variant matches fastvit_sa12 "
+                "and that reparam mode is consistent."
+            )
 
     # ──────────────────────────────────────────────────────────────────────
     # Forward
