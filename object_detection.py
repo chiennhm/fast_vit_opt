@@ -32,6 +32,7 @@ import numpy as np
 
 # Project imports
 from detection.fastvit_detector import FastViTDetector
+from detection.maskrcnn_detector import FastViTMaskRCNN
 from detection.losses import DetectionLoss
 from detection.eval_voc import evaluate_voc, print_eval_results
 from detection.visualize import save_detection_results, VOC_CLASSES
@@ -92,6 +93,14 @@ def parse_args():
         help="Don't auto-download VOC dataset"
     )
 
+    # Architecture
+    parser.add_argument(
+        "--arch", type=str, default="fastvit",
+        choices=["fastvit", "maskrcnn"],
+        help="Detector architecture: 'fastvit' (FastViT+FPN+RetinaNet) or "
+             "'maskrcnn' (FastViT-SA12+FPN+Mask R-CNN). Default: fastvit"
+    )
+
     # Model
     parser.add_argument(
         "--model", type=str, default="fastvit_sa12",
@@ -99,7 +108,7 @@ def parse_args():
             "fastvit_t8", "fastvit_t12", "fastvit_s12",
             "fastvit_sa12", "fastvit_sa24", "fastvit_sa36", "fastvit_ma36",
         ],
-        help="FastViT backbone variant (default: fastvit_sa12)"
+        help="FastViT backbone variant (default: fastvit_sa12, used by both archs)"
     )
     parser.add_argument(
         "--fpn-channels", type=int, default=256,
@@ -107,7 +116,7 @@ def parse_args():
     )
     parser.add_argument(
         "--pretrained-backbone", type=str, default=None,
-        help="Path to pretrained backbone checkpoint"
+        help="Path to pretrained backbone checkpoint (ImageNet weights, e.g. best.pth)"
     )
 
     # Training
@@ -261,10 +270,14 @@ class WarmupCosineScheduler:
 
 
 # ============================================================================
-# Training
+# Training — FastViT (RetinaNet-style)
 # ============================================================================
-def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epoch, args):
-    """Train for one epoch."""
+def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, device, epoch, args):
+    """Train FastViT+FPN+RetinaNet for one epoch.
+
+    The model outputs (cls_preds, reg_preds, anchors); loss is computed
+    externally by the DetectionLoss criterion.
+    """
     model.train()
     total_cls_loss = 0.0
     total_reg_loss = 0.0
@@ -350,6 +363,137 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
     avg_reg = total_reg_loss / max(total_samples, 1)
 
     return {"cls_loss": avg_cls, "reg_loss": avg_reg, "total_loss": avg_cls + avg_reg}
+
+
+# ============================================================================
+# Training — Mask R-CNN (torchvision-style)
+# ============================================================================
+def _prepare_maskrcnn_targets(
+    targets: list, device: torch.device
+) -> list:
+    """Convert dataset targets to torchvision Mask R-CNN format.
+
+    torchvision expects List[Dict] where each dict has at minimum:
+        boxes  : FloatTensor[N, 4]  — [x1, y1, x2, y2]
+        labels : Int64Tensor[N]     — 1-indexed class ids
+
+    The existing voc_dataset / coco_dataset already produce this format.
+    We strip 'difficults' and any extra keys that torchvision doesn't expect.
+    """
+    allowed = {"boxes", "labels", "masks", "area", "iscrowd"}
+    out = []
+    for t in targets:
+        d = {k: v.to(device, non_blocking=True)
+             for k, v in t.items() if k in allowed}
+        # Ensure boxes is float and labels is int64
+        d["boxes"] = d["boxes"].float()
+        d["labels"] = d["labels"].long()
+        out.append(d)
+    return out
+
+
+def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch, args):
+    """Train FastViTMaskRCNN for one epoch.
+
+    torchvision Mask R-CNN computes all losses **internally** when called as
+    ``model(images, targets)`` in training mode and returns a loss dict:
+        loss_classifier, loss_box_reg, loss_mask, loss_objectness, loss_rpn_box_reg
+
+    Images must be passed as List[Tensor], not a batched tensor.
+    """
+    model.train()
+    total_loss_sum = 0.0
+    total_samples = 0
+    num_batches = len(dataloader)
+    start_time = time.time()
+
+    for batch_idx, (images, targets) in enumerate(dataloader):
+        # torchvision expects List[Tensor], not a batched (B, C, H, W) tensor
+        image_list = [img.to(device, non_blocking=True) for img in images.unbind(0)]
+        target_list = _prepare_maskrcnn_targets(targets, device)
+
+        optimizer.zero_grad()
+
+        if args.amp and device.type == "cuda":
+            with autocast('cuda'):
+                loss_dict = model(image_list, target_list)
+                loss = sum(loss_dict.values())
+            scaler.scale(loss).backward()
+            grad_norm = None
+            if args.clip_grad:
+                scaler.unscale_(optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), args.clip_grad
+                ).item()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss_dict = model(image_list, target_list)
+            loss = sum(loss_dict.values())
+            loss.backward()
+            grad_norm = None
+            if args.clip_grad:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), args.clip_grad
+                ).item()
+            optimizer.step()
+
+        batch_size = len(image_list)
+        total_loss_val = loss.item()
+        total_loss_sum += total_loss_val * batch_size
+        total_samples += batch_size
+
+        # Unpack individual losses for logging
+        cls_loss_val = loss_dict.get("loss_classifier", torch.tensor(0.0)).item()
+        box_loss_val = loss_dict.get("loss_box_reg",    torch.tensor(0.0)).item()
+        mask_loss_val = loss_dict.get("loss_mask",       torch.tensor(0.0)).item()
+        rpn_cls_val   = loss_dict.get("loss_objectness", torch.tensor(0.0)).item()
+        rpn_box_val   = loss_dict.get("loss_rpn_box_reg", torch.tensor(0.0)).item()
+
+        global_step = epoch * num_batches + batch_idx
+        if args.use_wandb:
+            log_dict = {
+                "train/total_loss":     total_loss_val,
+                "train/cls_loss":       cls_loss_val,
+                "train/box_loss":       box_loss_val,
+                "train/mask_loss":      mask_loss_val,
+                "train/rpn_cls_loss":   rpn_cls_val,
+                "train/rpn_box_loss":   rpn_box_val,
+                "train/lr_backbone":    optimizer.param_groups[0]["lr"],
+                "train/lr_head":        optimizer.param_groups[2]["lr"],
+            }
+            if grad_norm is not None:
+                log_dict["train/grad_norm"] = grad_norm
+            wandb.log(log_dict, step=global_step)
+
+        if (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
+            elapsed = time.time() - start_time
+            eta = elapsed / (batch_idx + 1) * (num_batches - batch_idx - 1)
+            logger.info(
+                f"Epoch [{epoch}][{batch_idx+1}/{num_batches}] "
+                f"total: {total_loss_val:.4f}  "
+                f"cls: {cls_loss_val:.4f}  box: {box_loss_val:.4f}  "
+                f"mask: {mask_loss_val:.4f}  "
+                f"rpn_cls: {rpn_cls_val:.4f}  rpn_box: {rpn_box_val:.4f}  "
+                f"grad: {(grad_norm or 0.0):.2f}  ETA: {eta:.0f}s"
+            )
+
+    avg_total = total_loss_sum / max(total_samples, 1)
+    return {"cls_loss": 0.0, "reg_loss": 0.0, "total_loss": avg_total}
+
+
+# ============================================================================
+# Dispatcher — picks correct train function based on arch
+# ============================================================================
+def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epoch, args):
+    """Dispatch to FastViT or Mask R-CNN training loop."""
+    if args.arch == "maskrcnn":
+        return train_one_epoch_maskrcnn(
+            model, dataloader, optimizer, scaler, device, epoch, args
+        )
+    return train_one_epoch_fastvit(
+        model, criterion, dataloader, optimizer, scaler, device, epoch, args
+    )
 
 
 # ============================================================================
@@ -547,14 +691,30 @@ def main():
     # ========================================================================
     # Model
     # ========================================================================
-    logger.info(f"Building model: {args.model}")
     num_classes = 80 if args.dataset == "coco" else 20
-    model = FastViTDetector(
-        model_name=args.model,
-        num_classes=num_classes,
-        fpn_channels=args.fpn_channels,
-        pretrained_backbone=args.pretrained_backbone,
-    )
+
+    if args.arch == "maskrcnn":
+        # ── Mask R-CNN: FastViT-SA12 backbone + torchvision RPN/RoI heads ──
+        # num_classes includes background: 21 for VOC, 81 for COCO
+        maskrcnn_num_classes = num_classes + 1
+        logger.info(
+            f"Building Mask R-CNN (FastViT-SA12 backbone, {maskrcnn_num_classes} classes)"
+        )
+        model = FastViTMaskRCNN(
+            num_classes=maskrcnn_num_classes,
+            fpn_out_channels=args.fpn_channels,
+            pretrained_backbone=args.pretrained_backbone,
+        )
+    else:
+        # ── FastViT + FPN + RetinaNet Head ───────────────────────────────
+        logger.info(f"Building FastViT detector: {args.model}")
+        model = FastViTDetector(
+            model_name=args.model,
+            num_classes=num_classes,
+            fpn_channels=args.fpn_channels,
+            pretrained_backbone=args.pretrained_backbone,
+        )
+
     model = model.to(device)
 
     # Count parameters
@@ -570,45 +730,44 @@ def main():
     # ========================================================================
     # Loss, Optimizer, Scheduler
     # ========================================================================
-    criterion = DetectionLoss(
-        num_classes=num_classes,
-        alpha=args.focal_alpha,
-        gamma=args.focal_gamma,
-    )
 
-    # Separate weight decay for conv/linear vs bias/norm, and backbone vs head
-    decay_params = []
-    no_decay_params = []
-    backbone_decay_params = []
-    backbone_no_decay_params = []
-    
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-            
-        is_backbone = "backbone" in name
-        
-        if "bias" in name or "bn" in name or "norm" in name or "layer_scale" in name:
-            if is_backbone:
-                backbone_no_decay_params.append(param)
-            else:
-                no_decay_params.append(param)
-        else:
-            if is_backbone:
-                backbone_decay_params.append(param)
-            else:
-                decay_params.append(param)
+    # FastViT needs an external criterion; Mask R-CNN computes loss internally.
+    criterion = None
+    if args.arch != "maskrcnn":
+        criterion = DetectionLoss(
+            num_classes=num_classes,
+            alpha=args.focal_alpha,
+            gamma=args.focal_gamma,
+        )
 
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": backbone_decay_params, "weight_decay": args.weight_decay, "lr": args.lr * 0.1},
-            {"params": backbone_no_decay_params, "weight_decay": 0.0, "lr": args.lr * 0.1},
-            {"params": decay_params, "weight_decay": args.weight_decay, "lr": args.lr},
-            {"params": no_decay_params, "weight_decay": 0.0, "lr": args.lr},
-        ],
-        lr=args.lr,
-        betas=(0.9, 0.999),
-    )
+    # Build parameter groups (backbone vs head, with/without weight-decay)
+    if args.arch == "maskrcnn":
+        # FastViTMaskRCNN exposes a helper for this
+        param_groups = model.get_param_groups(
+            base_lr=args.lr,
+            backbone_lr_scale=0.1,
+            weight_decay=args.weight_decay,
+        )
+    else:
+        # Build groups manually for FastViTDetector (same as before)
+        decay_params, no_decay_params = [], []
+        backbone_decay_params, backbone_no_decay_params = [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            is_backbone = "backbone" in name
+            if "bias" in name or "bn" in name or "norm" in name or "layer_scale" in name:
+                (backbone_no_decay_params if is_backbone else no_decay_params).append(param)
+            else:
+                (backbone_decay_params if is_backbone else decay_params).append(param)
+        param_groups = [
+            {"params": backbone_decay_params,    "weight_decay": args.weight_decay, "lr": args.lr * 0.1},
+            {"params": backbone_no_decay_params, "weight_decay": 0.0,               "lr": args.lr * 0.1},
+            {"params": decay_params,             "weight_decay": args.weight_decay, "lr": args.lr},
+            {"params": no_decay_params,          "weight_decay": 0.0,               "lr": args.lr},
+        ]
+
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
 
     scheduler = WarmupCosineScheduler(
         optimizer,
@@ -648,7 +807,9 @@ def main():
     # ========================================================================
     logger.info("=" * 60)
     logger.info("Starting training")
+    logger.info(f"  Arch:       {args.arch}")
     logger.info(f"  Model:      {args.model}")
+    logger.info(f"  Pretrained: {args.pretrained_backbone}")
     logger.info(f"  Epochs:     {args.epochs}")
     logger.info(f"  Batch size: {args.batch_size}")
     logger.info(f"  LR:         {args.lr}")
