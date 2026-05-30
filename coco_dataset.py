@@ -369,17 +369,20 @@ class COCODetectionDataset(Dataset):
             boxes[:, 2] *= scale_x
             boxes[:, 3] *= scale_y
 
-        if masks is not None and len(masks) > 0:
-            # Resize each mask using nearest-neighbour to preserve binary values
-            resized = np.zeros(
-                (masks.shape[0], target_size, target_size), dtype=masks.dtype
-            )
-            for i, m in enumerate(masks):
-                pil_m = Image.fromarray(m).resize(
-                    (target_size, target_size), Image.NEAREST
+        if masks is not None:
+            if len(masks) > 0:
+                # Resize each mask using nearest-neighbour to preserve binary values
+                resized = np.zeros(
+                    (masks.shape[0], target_size, target_size), dtype=masks.dtype
                 )
-                resized[i] = np.array(pil_m, dtype=masks.dtype)
-            masks = resized
+                for i, m in enumerate(masks):
+                    pil_m = Image.fromarray(m).resize(
+                        (target_size, target_size), Image.NEAREST
+                    )
+                    resized[i] = np.array(pil_m, dtype=masks.dtype)
+                masks = resized
+            else:
+                masks = np.zeros((0, target_size, target_size), dtype=masks.dtype)
 
         if masks is not None:
             return image, boxes, masks

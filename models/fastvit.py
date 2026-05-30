@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.models.layers import DropPath, trunc_normal_
+from timm.layers import DropPath, trunc_normal_
 
 # Suppress "Overwriting fastvit_* in registry" warnings that occur when a
 # newer version of timm already ships built-in FastViT variants.
@@ -24,7 +24,7 @@ with warnings.catch_warnings():
         message="Overwriting fastvit",
         category=UserWarning,
     )
-    from timm.models.registry import register_model
+    from timm.models import register_model
 
 from models.modules.mobileone import MobileOneBlock
 from models.modules.replknet import ReparamLargeKernelConv
