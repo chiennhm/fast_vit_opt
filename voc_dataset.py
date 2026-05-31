@@ -178,7 +178,9 @@ class VOCDetectionDataset(Dataset):
             train_difficults = np.zeros(len(train_boxes), dtype=bool)
 
             if len(train_boxes) > 0:
-                image, train_boxes = self._augment(image, train_boxes)
+                image, train_boxes, train_labels, train_difficults = self._augment(
+                    image, train_boxes, train_labels, train_difficults
+                )
                 # Filter invalid boxes after _augment
                 train_boxes, train_labels, train_difficults = filter_and_clip_boxes(
                     train_boxes, image.size[0], image.size[1], train_labels, train_difficults
@@ -218,7 +220,7 @@ class VOCDetectionDataset(Dataset):
 
         return image, targets
 
-    def _augment(self, image, boxes):
+    def _augment(self, image, boxes, labels, difficults):
         """Apply detection-safe augmentations."""
         w, h = image.size
 
@@ -261,15 +263,15 @@ class VOCDetectionDataset(Dataset):
 
         # Random crop (IoU-aware)
         if random.random() > 0.5:
-            image, boxes = self._random_crop(image, boxes)
+            image, boxes, labels, difficults = self._random_crop(image, boxes, labels, difficults)
 
-        return image, boxes
+        return image, boxes, labels, difficults
 
-    def _random_crop(self, image, boxes):
+    def _random_crop(self, image, boxes, labels, difficults):
         """Random crop ensuring at least one box center remains."""
         w, h = image.size
         if len(boxes) == 0:
-            return image, boxes
+            return image, boxes, labels, difficults
 
         for _ in range(50):  # Max attempts
             min_scale = 0.5
@@ -290,8 +292,6 @@ class VOCDetectionDataset(Dataset):
             if not mask.any():
                 continue
 
-            image = image.crop((left, top, right, bottom))
-
             # Adjust boxes
             new_boxes = boxes[mask].copy()
             new_boxes[:, 0] = np.clip(new_boxes[:, 0] - left, 0, crop_w)
@@ -299,13 +299,17 @@ class VOCDetectionDataset(Dataset):
             new_boxes[:, 2] = np.clip(new_boxes[:, 2] - left, 0, crop_w)
             new_boxes[:, 3] = np.clip(new_boxes[:, 3] - top, 0, crop_h)
 
+            new_labels = labels[mask]
+            new_difficults = difficults[mask]
+
             # Filter out boxes that are too small
             valid = (new_boxes[:, 2] - new_boxes[:, 0] > 5) & \
                     (new_boxes[:, 3] - new_boxes[:, 1] > 5)
             if valid.any():
-                return image, new_boxes[valid]
+                cropped_image = image.crop((left, top, right, bottom))
+                return cropped_image, new_boxes[valid], new_labels[valid], new_difficults[valid]
 
-        return image, boxes
+        return image, boxes, labels, difficults
 
     def _resize(self, image, boxes, target_size):
         """Resize image and scale boxes accordingly."""

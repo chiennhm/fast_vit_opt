@@ -256,8 +256,8 @@ class COCODetectionDataset(Dataset):
             train_iscrowd = iscrowd[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
 
             if len(train_boxes) > 0:
-                image, train_boxes, train_masks = self._augment(
-                    image, train_boxes, train_masks
+                image, train_boxes, train_masks, train_labels, train_iscrowd = self._augment(
+                    image, train_boxes, train_masks, train_labels, train_iscrowd
                 )
                 # Filter invalid boxes after _augment
                 train_boxes, train_labels, train_masks, train_iscrowd = filter_and_clip_boxes(
@@ -315,7 +315,7 @@ class COCODetectionDataset(Dataset):
 
         return image, targets
 
-    def _augment(self, image, boxes, masks):
+    def _augment(self, image, boxes, masks, labels, iscrowd):
         """Apply detection-safe augmentations to image, boxes, and masks."""
         w, h = image.size
 
@@ -367,15 +367,15 @@ class COCODetectionDataset(Dataset):
 
         # Random crop (IoU-aware)
         if random.random() > 0.5:
-            image, boxes, masks = self._random_crop(image, boxes, masks)
+            image, boxes, masks, labels, iscrowd = self._random_crop(image, boxes, masks, labels, iscrowd)
 
-        return image, boxes, masks
+        return image, boxes, masks, labels, iscrowd
 
-    def _random_crop(self, image, boxes, masks):
+    def _random_crop(self, image, boxes, masks, labels, iscrowd):
         """Random crop ensuring at least one box center remains."""
         w, h = image.size
         if len(boxes) == 0:
-            return image, boxes, masks
+            return image, boxes, masks, labels, iscrowd
 
         for _ in range(50):  # Max attempts
             scale  = random.uniform(0.5, 1.0)
@@ -394,8 +394,6 @@ class COCODetectionDataset(Dataset):
             if not keep.any():
                 continue
 
-            image = image.crop((left, top, right, bottom))
-
             # Adjust boxes
             new_boxes = boxes[keep].copy()
             new_boxes[:, 0] = np.clip(new_boxes[:, 0] - left, 0, crop_w)
@@ -407,13 +405,17 @@ class COCODetectionDataset(Dataset):
             new_masks = masks[keep, top:bottom, left:right].copy() \
                 if len(masks) > 0 else masks[keep]
 
+            new_labels = labels[keep]
+            new_iscrowd = iscrowd[keep]
+
             # Filter tiny boxes
             valid = ((new_boxes[:, 2] - new_boxes[:, 0]) > 5) & \
                     ((new_boxes[:, 3] - new_boxes[:, 1]) > 5)
             if valid.any():
-                return image, new_boxes[valid], new_masks[valid]
+                cropped_image = image.crop((left, top, right, bottom))
+                return cropped_image, new_boxes[valid], new_masks[valid], new_labels[valid], new_iscrowd[valid]
 
-        return image, boxes, masks
+        return image, boxes, masks, labels, iscrowd
 
     def _resize(self, image, boxes, target_size, masks=None):
         """Resize image, boxes, and masks to target_size × target_size."""
