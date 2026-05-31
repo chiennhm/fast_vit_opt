@@ -16,6 +16,7 @@
 BATCH_SIZE=${1:-4}
 DATA_DIR=${2:-./data/coco}
 PRETRAINED=${3:-./best.pth}
+ACCUM_STEPS=${4:-4}
 DATASET=coco
 IMG_SIZE=512
 EPOCHS=50
@@ -24,15 +25,22 @@ WORKERS=4
 OUTPUT_DIR=./output/maskrcnn_coco
 EVAL_INTERVAL=1
 
+# Memory stability defaults for Mask R-CNN
+RPN_PRE_NMS=1000
+RPN_POST_NMS=1000
+RPN_BATCH_SIZE=128
+BOX_BATCH_SIZE=128
+
 # Wandb
 WANDB_PROJECT="fastvit-maskrcnn-coco"
-WANDB_NAME="maskrcnn_fastvit_sa12_bs${BATCH_SIZE}_ep${EPOCHS}"
+WANDB_NAME="maskrcnn_fastvit_sa12_bs${BATCH_SIZE}_acc${ACCUM_STEPS}_ep${EPOCHS}"
 
 # --- Print config ---
 echo "============================================================"
 echo "  Mask R-CNN (FastViT-SA12) Training on COCO"
 echo "============================================================"
-echo "  Batch size:   ${BATCH_SIZE}"
+echo "  Batch size:   ${BATCH_SIZE} (Effective batch size: $((BATCH_SIZE * ACCUM_STEPS)))"
+echo "  Accum steps:  ${ACCUM_STEPS}"
 echo "  Image size:   ${IMG_SIZE}"
 echo "  Epochs:       ${EPOCHS}"
 echo "  LR:           ${LR}"
@@ -56,6 +64,11 @@ python object_detection.py \
     --coco-val-img   ${DATA_DIR}/val2017 \
     --coco-val-ann   ${DATA_DIR}/annotations/instances_val2017.json \
     --batch-size ${BATCH_SIZE} \
+    --accum-steps ${ACCUM_STEPS} \
+    --rpn-pre-nms-train ${RPN_PRE_NMS} \
+    --rpn-post-nms-train ${RPN_POST_NMS} \
+    --rpn-batch-size ${RPN_BATCH_SIZE} \
+    --box-batch-size ${BOX_BATCH_SIZE} \
     --img-size ${IMG_SIZE} \
     --epochs ${EPOCHS} \
     --lr ${LR} \

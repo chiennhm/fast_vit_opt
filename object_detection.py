@@ -144,6 +144,26 @@ def parse_args():
         "--clip-grad", type=float, default=5.0,
         help="Gradient clipping norm (default: 5.0)"
     )
+    parser.add_argument(
+        "--accum-steps", type=int, default=1,
+        help="Number of steps to accumulate gradients (default: 1)"
+    )
+    parser.add_argument(
+        "--rpn-pre-nms-train", type=int, default=1000,
+        help="RPN pre-NMS proposals to keep during training (default: 1000)"
+    )
+    parser.add_argument(
+        "--rpn-post-nms-train", type=int, default=1000,
+        help="RPN post-NMS proposals to keep during training (default: 1000)"
+    )
+    parser.add_argument(
+        "--rpn-batch-size", type=int, default=128,
+        help="Anchors sampled per image for RPN loss calculation (default: 128)"
+    )
+    parser.add_argument(
+        "--box-batch-size", type=int, default=128,
+        help="Proposals sampled per image for Box/Mask heads loss (default: 128)"
+    )
 
     # Loss
     parser.add_argument(
@@ -285,6 +305,7 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
     num_batches = len(dataloader)
 
     start_time = time.time()
+    optimizer.zero_grad()
 
     for batch_idx, (images, targets) in enumerate(dataloader):
         images = images.to(device, non_blocking=True)
@@ -293,36 +314,40 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
             for t in targets
         ]
 
-        optimizer.zero_grad()
-
         if args.amp and device.type == "cuda":
             with autocast('cuda'):
                 cls_preds, reg_preds, anchors = model(images)
                 loss_dict = criterion(cls_preds, reg_preds, anchors, targets)
-                loss = loss_dict["cls_loss"] + loss_dict["reg_loss"]
+                unscaled_loss = loss_dict["cls_loss"] + loss_dict["reg_loss"]
+                loss = unscaled_loss / args.accum_steps
 
             scaler.scale(loss).backward()
             grad_norm = None
-            if args.clip_grad:
-                scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
-            scaler.step(optimizer)
-            scaler.update()
+            if (batch_idx + 1) % args.accum_steps == 0 or (batch_idx + 1) == num_batches:
+                if args.clip_grad:
+                    scaler.unscale_(optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
         else:
             cls_preds, reg_preds, anchors = model(images)
             loss_dict = criterion(cls_preds, reg_preds, anchors, targets)
-            loss = loss_dict["cls_loss"] + loss_dict["reg_loss"]
+            unscaled_loss = loss_dict["cls_loss"] + loss_dict["reg_loss"]
+            loss = unscaled_loss / args.accum_steps
 
             loss.backward()
             grad_norm = None
-            if args.clip_grad:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
-            optimizer.step()
+            if (batch_idx + 1) % args.accum_steps == 0 or (batch_idx + 1) == num_batches:
+                if args.clip_grad:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
+                optimizer.step()
+                optimizer.zero_grad()
 
         batch_size = images.shape[0]
         cls_loss_val = loss_dict["cls_loss"].item()
         reg_loss_val = loss_dict["reg_loss"].item()
-        total_loss_val = loss.item()
+        total_loss_val = unscaled_loss.item()
         total_cls_loss += cls_loss_val * batch_size
         total_reg_loss += reg_loss_val * batch_size
         total_samples += batch_size
@@ -361,6 +386,9 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
 
     avg_cls = total_cls_loss / max(total_samples, 1)
     avg_reg = total_reg_loss / max(total_samples, 1)
+
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     return {"cls_loss": avg_cls, "reg_loss": avg_reg, "total_loss": avg_cls + avg_reg}
 
@@ -407,39 +435,45 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
     num_batches = len(dataloader)
     start_time = time.time()
 
+    optimizer.zero_grad()
+
     for batch_idx, (images, targets) in enumerate(dataloader):
         # torchvision expects List[Tensor], not a batched (B, C, H, W) tensor
         image_list = [img.to(device, non_blocking=True) for img in images.unbind(0)]
         target_list = _prepare_maskrcnn_targets(targets, device)
 
-        optimizer.zero_grad()
-
         if args.amp and device.type == "cuda":
             with autocast('cuda'):
                 loss_dict = model(image_list, target_list)
-                loss = sum(loss_dict.values())
+                unscaled_loss = sum(loss_dict.values())
+                loss = unscaled_loss / args.accum_steps
             scaler.scale(loss).backward()
             grad_norm = None
-            if args.clip_grad:
-                scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), args.clip_grad
-                ).item()
-            scaler.step(optimizer)
-            scaler.update()
+            if (batch_idx + 1) % args.accum_steps == 0 or (batch_idx + 1) == num_batches:
+                if args.clip_grad:
+                    scaler.unscale_(optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.clip_grad
+                    ).item()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
         else:
             loss_dict = model(image_list, target_list)
-            loss = sum(loss_dict.values())
+            unscaled_loss = sum(loss_dict.values())
+            loss = unscaled_loss / args.accum_steps
             loss.backward()
             grad_norm = None
-            if args.clip_grad:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), args.clip_grad
-                ).item()
-            optimizer.step()
+            if (batch_idx + 1) % args.accum_steps == 0 or (batch_idx + 1) == num_batches:
+                if args.clip_grad:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.clip_grad
+                    ).item()
+                optimizer.step()
+                optimizer.zero_grad()
 
         batch_size = len(image_list)
-        total_loss_val = loss.item()
+        total_loss_val = unscaled_loss.item()
         total_loss_sum += total_loss_val * batch_size
         total_samples += batch_size
 
@@ -479,6 +513,8 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
             )
 
     avg_total = total_loss_sum / max(total_samples, 1)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     return {"cls_loss": 0.0, "reg_loss": 0.0, "total_loss": avg_total}
 
 
@@ -704,6 +740,10 @@ def main():
             num_classes=maskrcnn_num_classes,
             fpn_out_channels=args.fpn_channels,
             pretrained_backbone=args.pretrained_backbone,
+            rpn_pre_nms_top_n_train=args.rpn_pre_nms_train,
+            rpn_post_nms_top_n_train=args.rpn_post_nms_train,
+            rpn_batch_size_per_image=args.rpn_batch_size,
+            box_batch_size_per_image=args.box_batch_size,
         )
     else:
         # ── FastViT + FPN + RetinaNet Head ───────────────────────────────

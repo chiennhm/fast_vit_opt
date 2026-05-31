@@ -159,6 +159,10 @@ class FastViTMaskRCNN(nn.Module):
         box_score_thresh: float = 0.05,
         box_nms_thresh: float = 0.5,
         box_detections_per_img: int = 100,
+        rpn_pre_nms_top_n_train: int = 1000,
+        rpn_post_nms_top_n_train: int = 1000,
+        rpn_batch_size_per_image: int = 128,
+        box_batch_size_per_image: int = 128,
     ):
         super().__init__()
 
@@ -215,6 +219,10 @@ class FastViTMaskRCNN(nn.Module):
             box_score_thresh=box_score_thresh,
             box_nms_thresh=box_nms_thresh,
             box_detections_per_img=box_detections_per_img,
+            rpn_pre_nms_top_n_train=rpn_pre_nms_top_n_train,
+            rpn_post_nms_top_n_train=rpn_post_nms_top_n_train,
+            rpn_batch_size_per_image=rpn_batch_size_per_image,
+            box_batch_size_per_image=box_batch_size_per_image,
         )
 
     # ──────────────────────────────────────────────────────────────────────
