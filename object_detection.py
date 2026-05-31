@@ -411,6 +411,16 @@ def _prepare_maskrcnn_targets(
     allowed = {"boxes", "labels", "masks", "area", "iscrowd"}
     out = []
     for t in targets:
+        # Filter degenerate boxes (width > 0 and height > 0)
+        boxes = t["boxes"]
+        if boxes.numel() > 0:
+            valid_mask = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+            if not valid_mask.all().item():
+                t = {
+                    k: v[valid_mask] if k in {"boxes", "labels", "masks", "area", "iscrowd", "difficults"} else v
+                    for k, v in t.items()
+                }
+
         d = {k: v.to(device, non_blocking=True)
              for k, v in t.items() if k in allowed}
         # Ensure boxes is float and labels is int64

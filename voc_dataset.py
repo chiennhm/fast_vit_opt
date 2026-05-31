@@ -24,6 +24,31 @@ VOC_CLASSES = [
 CLASS_TO_IDX = {cls: i + 1 for i, cls in enumerate(VOC_CLASSES)}  # 1-indexed
 
 
+def filter_and_clip_boxes(boxes, img_w, img_h, labels, difficults):
+    """Clip boxes to image size, and filter out invalid boxes (width <= 0 or height <= 0).
+
+    Also filters corresponding labels and difficults arrays.
+    """
+    if len(boxes) == 0:
+        return boxes, labels, difficults
+
+    # Clip coordinates to [0, img_w] and [0, img_h]
+    boxes = boxes.copy()
+    boxes[:, 0] = np.clip(boxes[:, 0], 0, img_w)
+    boxes[:, 1] = np.clip(boxes[:, 1], 0, img_h)
+    boxes[:, 2] = np.clip(boxes[:, 2], 0, img_w)
+    boxes[:, 3] = np.clip(boxes[:, 3], 0, img_h)
+
+    # Filter out boxes with width <= 0 or height <= 0
+    valid_mask = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+
+    boxes = boxes[valid_mask]
+    labels = labels[valid_mask]
+    difficults = difficults[valid_mask]
+
+    return boxes, labels, difficults
+
+
 class VOCDetectionDataset(Dataset):
     """PASCAL VOC Detection Dataset.
 
@@ -110,6 +135,10 @@ class VOCDetectionDataset(Dataset):
             x2 = float(bndbox.find("xmax").text) - 1
             y2 = float(bndbox.find("ymax").text) - 1
 
+            # Ensure coordinates are sorted
+            x1, x2 = min(x1, x2), max(x1, x2)
+            y1, y2 = min(y1, y2), max(y1, y2)
+
             boxes.append([x1, y1, x2, y2])
             labels.append(CLASS_TO_IDX[name])
             difficults.append(is_difficult)
@@ -135,16 +164,32 @@ class VOCDetectionDataset(Dataset):
             labels = np.array(labels, dtype=np.int64)
             difficults = np.array(difficults, dtype=bool)
 
+            # Clip bbox to image size initially
+            boxes[:, 0] = np.clip(boxes[:, 0], 0, orig_w)
+            boxes[:, 1] = np.clip(boxes[:, 1], 0, orig_h)
+            boxes[:, 2] = np.clip(boxes[:, 2], 0, orig_w)
+            boxes[:, 3] = np.clip(boxes[:, 3], 0, orig_h)
+
         if self.augment:
             # For training: exclude difficult objects from augmentation & targets
             easy_mask = ~difficults
             train_boxes = boxes[easy_mask] if easy_mask.any() else np.zeros((0, 4), dtype=np.float32)
             train_labels = labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
+            train_difficults = np.zeros(len(train_boxes), dtype=bool)
 
             if len(train_boxes) > 0:
                 image, train_boxes = self._augment(image, train_boxes)
+                # Filter invalid boxes after _augment
+                train_boxes, train_labels, train_difficults = filter_and_clip_boxes(
+                    train_boxes, image.size[0], image.size[1], train_labels, train_difficults
+                )
 
-            image, train_boxes = self._resize(image, train_boxes, self.img_size)
+            if len(train_boxes) > 0:
+                image, train_boxes = self._resize(image, train_boxes, self.img_size)
+                # Filter invalid boxes after _resize
+                train_boxes, train_labels, train_difficults = filter_and_clip_boxes(
+                    train_boxes, self.img_size, self.img_size, train_labels, train_difficults
+                )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
@@ -155,7 +200,12 @@ class VOCDetectionDataset(Dataset):
             }
         else:
             # For eval: keep all objects, pass difficult flag
-            image, boxes = self._resize(image, boxes, self.img_size)
+            if len(boxes) > 0:
+                image, boxes = self._resize(image, boxes, self.img_size)
+                # Filter invalid boxes after _resize
+                boxes, labels, difficults = filter_and_clip_boxes(
+                    boxes, self.img_size, self.img_size, labels, difficults
+                )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)

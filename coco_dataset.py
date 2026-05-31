@@ -40,6 +40,33 @@ COCO_CAT_IDS = [
 COCO_CAT_TO_IDX = {cat_id: i + 1 for i, cat_id in enumerate(COCO_CAT_IDS)}
 
 
+def filter_and_clip_boxes(boxes, img_w, img_h, labels, masks, iscrowd):
+    """Clip boxes to image size, and filter out invalid boxes (width <= 0 or height <= 0).
+
+    Also filters corresponding labels, masks, and iscrowd arrays.
+    """
+    if len(boxes) == 0:
+        return boxes, labels, masks, iscrowd
+
+    # Clip coordinates to [0, img_w] and [0, img_h]
+    boxes = boxes.copy()
+    boxes[:, 0] = np.clip(boxes[:, 0], 0, img_w)
+    boxes[:, 1] = np.clip(boxes[:, 1], 0, img_h)
+    boxes[:, 2] = np.clip(boxes[:, 2], 0, img_w)
+    boxes[:, 3] = np.clip(boxes[:, 3], 0, img_h)
+
+    # Filter out boxes with width <= 0 or height <= 0
+    valid_mask = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+
+    boxes = boxes[valid_mask]
+    labels = labels[valid_mask]
+    if len(masks) > 0:
+        masks = masks[valid_mask]
+    iscrowd = iscrowd[valid_mask]
+
+    return boxes, labels, masks, iscrowd
+
+
 class COCODetectionDataset(Dataset):
     """MS-COCO Detection Dataset using pure Python JSON parser.
 
@@ -154,13 +181,13 @@ class COCODetectionDataset(Dataset):
         Returns:
             boxes:     list of [x1, y1, x2, y2]
             labels:    list of class indices (1-indexed)
-            difficults: list of bools (iscrowd)
+            iscrowd:   list of ints (0 or 1)
             masks:     list of binary np.ndarray (H, W) uint8
         """
         anns = self.img_to_anns[img_id]
         boxes = []
         labels = []
-        difficults = []
+        iscrowd = []
         masks = []
 
         for ann in anns:
@@ -175,15 +202,24 @@ class COCODetectionDataset(Dataset):
             x2 = x1 + float(bbox[2])
             y2 = y1 + float(bbox[3])
 
-            # Treat iscrowd=1 as difficult
-            is_difficult = bool(ann.get("iscrowd", 0) == 1)
+            # Clip bbox to image size
+            x1 = max(0.0, min(float(img_w), x1))
+            y1 = max(0.0, min(float(img_h), y1))
+            x2 = max(0.0, min(float(img_w), x2))
+            y2 = max(0.0, min(float(img_h), y2))
 
-            boxes.append([x1, y1, x2, y2])
-            labels.append(COCO_CAT_TO_IDX[cat_id])
-            difficults.append(is_difficult)
-            masks.append(self._decode_mask(ann, img_h, img_w))
+            # Ensure coordinates are sorted
+            x1, x2 = min(x1, x2), max(x1, x2)
+            y1, y2 = min(y1, y2), max(y1, y2)
 
-        return boxes, labels, difficults, masks
+            # Check if valid (width > 0 and height > 0)
+            if x2 > x1 and y2 > y1:
+                boxes.append([x1, y1, x2, y2])
+                labels.append(COCO_CAT_TO_IDX[cat_id])
+                iscrowd.append(int(ann.get("iscrowd", 0)))
+                masks.append(self._decode_mask(ann, img_h, img_w))
+
+        return boxes, labels, iscrowd, masks
 
     def __getitem__(self, idx):
         img_id = self.img_ids[idx]
@@ -196,60 +232,85 @@ class COCODetectionDataset(Dataset):
         orig_w, orig_h = image.size
 
         # Get annotations (with segmentation masks)
-        boxes, labels, difficults, masks = self._get_annotations(
+        boxes, labels, iscrowd, masks = self._get_annotations(
             img_id, img_h=orig_h, img_w=orig_w
         )
 
         if len(boxes) == 0:
             boxes      = np.zeros((0, 4),         dtype=np.float32)
             labels     = np.array([],             dtype=np.int64)
-            difficults = np.array([],             dtype=bool)
+            iscrowd    = np.array([],             dtype=np.int64)
             masks      = np.zeros((0, orig_h, orig_w), dtype=np.uint8)
         else:
             boxes      = np.array(boxes,      dtype=np.float32)
             labels     = np.array(labels,     dtype=np.int64)
-            difficults = np.array(difficults, dtype=bool)
+            iscrowd    = np.array(iscrowd,    dtype=np.int64)
             masks      = np.stack(masks, axis=0)  # (N, H, W)
 
         if self.augment:
-            # Training: exclude iscrowd objects
-            easy_mask    = ~difficults
+            # Training: exclude iscrowd objects (iscrowd == 1)
+            easy_mask    = iscrowd == 0
             train_boxes  = boxes[easy_mask]  if easy_mask.any() else np.zeros((0, 4), dtype=np.float32)
             train_labels = labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
             train_masks  = masks[easy_mask]  if easy_mask.any() else np.zeros((0, orig_h, orig_w), dtype=np.uint8)
+            train_iscrowd = iscrowd[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
 
             if len(train_boxes) > 0:
                 image, train_boxes, train_masks = self._augment(
                     image, train_boxes, train_masks
                 )
+                # Filter invalid boxes after _augment
+                train_boxes, train_labels, train_masks, train_iscrowd = filter_and_clip_boxes(
+                    train_boxes, image.size[0], image.size[1], train_labels, train_masks, train_iscrowd
+                )
 
-            image, train_boxes, train_masks = self._resize(
-                image, train_boxes, self.img_size, train_masks
-            )
+            if len(train_boxes) > 0:
+                image, train_boxes, train_masks = self._resize(
+                    image, train_boxes, self.img_size, train_masks
+                )
+                # Filter invalid boxes after _resize
+                train_boxes, train_labels, train_masks, train_iscrowd = filter_and_clip_boxes(
+                    train_boxes, self.img_size, self.img_size, train_labels, train_masks, train_iscrowd
+                )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
+
+            # Calculate areas of filtered boxes
+            areas = (train_boxes[:, 2] - train_boxes[:, 0]) * (train_boxes[:, 3] - train_boxes[:, 1])
 
             targets = {
                 "boxes":  torch.tensor(train_boxes,  dtype=torch.float32),
                 "labels": torch.tensor(train_labels, dtype=torch.int64),
                 # torchvision MaskRCNN expects BoolTensor masks (N, H, W)
                 "masks":  torch.tensor(train_masks,  dtype=torch.bool),
+                "area":   torch.tensor(areas,        dtype=torch.float32),
+                "iscrowd": torch.tensor(train_iscrowd, dtype=torch.int64),
             }
         else:
-            # Eval: keep all, include difficult flag
-            image, boxes, masks = self._resize(
-                image, boxes, self.img_size, masks
-            )
+            # Eval: keep all
+            if len(boxes) > 0:
+                image, boxes, masks = self._resize(
+                    image, boxes, self.img_size, masks
+                )
+                # Filter invalid boxes after _resize
+                boxes, labels, masks, iscrowd = filter_and_clip_boxes(
+                    boxes, self.img_size, self.img_size, labels, masks, iscrowd
+                )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
+
+            # Calculate areas of filtered boxes
+            areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
 
             targets = {
                 "boxes":      torch.tensor(boxes,      dtype=torch.float32),
                 "labels":     torch.tensor(labels,     dtype=torch.int64),
                 "masks":      torch.tensor(masks,      dtype=torch.bool),
-                "difficults": torch.tensor(difficults, dtype=torch.bool),
+                "area":       torch.tensor(areas,      dtype=torch.float32),
+                "iscrowd":    torch.tensor(iscrowd,    dtype=torch.int64),
+                "difficults": torch.tensor(iscrowd == 1, dtype=torch.bool),
             }
 
         return image, targets
