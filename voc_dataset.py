@@ -186,12 +186,11 @@ class VOCDetectionDataset(Dataset):
                     train_boxes, image.size[0], image.size[1], train_labels, train_difficults
                 )
 
-            if len(train_boxes) > 0:
-                image, train_boxes = self._resize(image, train_boxes, self.img_size)
-                # Filter invalid boxes after _resize
-                train_boxes, train_labels, train_difficults = filter_and_clip_boxes(
-                    train_boxes, self.img_size, self.img_size, train_labels, train_difficults
-                )
+            image, train_boxes = self._resize(image, train_boxes, self.img_size)
+            # Filter invalid boxes after _resize
+            train_boxes, train_labels, train_difficults = filter_and_clip_boxes(
+                train_boxes, self.img_size, self.img_size, train_labels, train_difficults
+            )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
@@ -202,12 +201,11 @@ class VOCDetectionDataset(Dataset):
             }
         else:
             # For eval: keep all objects, pass difficult flag
-            if len(boxes) > 0:
-                image, boxes = self._resize(image, boxes, self.img_size)
-                # Filter invalid boxes after _resize
-                boxes, labels, difficults = filter_and_clip_boxes(
-                    boxes, self.img_size, self.img_size, labels, difficults
-                )
+            image, boxes = self._resize(image, boxes, self.img_size)
+            # Filter invalid boxes after _resize
+            boxes, labels, difficults = filter_and_clip_boxes(
+                boxes, self.img_size, self.img_size, labels, difficults
+            )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)

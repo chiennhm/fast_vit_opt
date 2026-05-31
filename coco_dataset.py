@@ -264,14 +264,13 @@ class COCODetectionDataset(Dataset):
                     train_boxes, image.size[0], image.size[1], train_labels, train_masks, train_iscrowd
                 )
 
-            if len(train_boxes) > 0:
-                image, train_boxes, train_masks = self._resize(
-                    image, train_boxes, self.img_size, train_masks
-                )
-                # Filter invalid boxes after _resize
-                train_boxes, train_labels, train_masks, train_iscrowd = filter_and_clip_boxes(
-                    train_boxes, self.img_size, self.img_size, train_labels, train_masks, train_iscrowd
-                )
+            image, train_boxes, train_masks = self._resize(
+                image, train_boxes, self.img_size, train_masks
+            )
+            # Filter invalid boxes after _resize
+            train_boxes, train_labels, train_masks, train_iscrowd = filter_and_clip_boxes(
+                train_boxes, self.img_size, self.img_size, train_labels, train_masks, train_iscrowd
+            )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
@@ -289,14 +288,13 @@ class COCODetectionDataset(Dataset):
             }
         else:
             # Eval: keep all
-            if len(boxes) > 0:
-                image, boxes, masks = self._resize(
-                    image, boxes, self.img_size, masks
-                )
-                # Filter invalid boxes after _resize
-                boxes, labels, masks, iscrowd = filter_and_clip_boxes(
-                    boxes, self.img_size, self.img_size, labels, masks, iscrowd
-                )
+            image, boxes, masks = self._resize(
+                image, boxes, self.img_size, masks
+            )
+            # Filter invalid boxes after _resize
+            boxes, labels, masks, iscrowd = filter_and_clip_boxes(
+                boxes, self.img_size, self.img_size, labels, masks, iscrowd
+            )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
