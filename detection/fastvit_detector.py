@@ -322,7 +322,17 @@ class FastViTDetector(nn.Module):
 
             # --- Pre-filter: keep only anchors whose max class score > threshold ---
             max_scores, _ = scores.max(dim=1)  # (A,)
+
+            # Limit candidate anchors to top 2000 to avoid CPU/GPU freeze on untrained models
+            pre_nms_top_n = min(2000, max_scores.numel())
+            _, topk_anchors_idx = max_scores.topk(pre_nms_top_n)
+
+            # Keep only the top-k anchors that also exceed the score threshold
             candidate_mask = max_scores > score_thresh
+            topk_mask = torch.zeros_like(candidate_mask)
+            topk_mask[topk_anchors_idx] = True
+            candidate_mask = candidate_mask & topk_mask
+
             if not candidate_mask.any():
                 results.append({
                     "boxes": torch.zeros((0, 4), device=images.device),
