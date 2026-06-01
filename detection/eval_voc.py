@@ -134,11 +134,40 @@ def evaluate_voc(
             cls_id = int(label)
             all_preds[cls_id].append((img_idx, float(score), box))
 
+    # Pre-process predictions: sort and truncate per class ONCE globally to save CPU
+    processed_preds = {}
+    for cls_id in range(1, num_classes + 1):
+        preds = all_preds.get(cls_id, [])
+        if len(preds) > 0:
+            preds = sorted(preds, key=lambda x: -x[1])
+            # Limit predictions per class to avoid CPU hang on untrained/random models
+            # (10,000 predictions is more than enough for mAP evaluation on 5,000 images)
+            if len(preds) > 10000:
+                preds = preds[:10000]
+        processed_preds[cls_id] = preds
+
+    # Pre-process ground truths: group by image and convert to numpy arrays ONCE globally
+    processed_gts = {}
+    for cls_id in range(1, num_classes + 1):
+        gts = all_gts.get(cls_id, [])
+        gt_by_image = defaultdict(lambda: {"boxes": [], "difficults": []})
+        for img_idx, box, diff in gts:
+            gt_by_image[img_idx]["boxes"].append(box)
+            gt_by_image[img_idx]["difficults"].append(diff)
+        
+        gt_lookup = {}
+        for img_idx, data in gt_by_image.items():
+            gt_lookup[img_idx] = {
+                "boxes": np.array(data["boxes"]),           # (G, 4)
+                "difficults": np.array(data["difficults"]),  # (G,)
+            }
+        processed_gts[cls_id] = gt_lookup
+
     # Evaluate at each threshold
     ap_per_threshold = {}
     for thresh in thresholds:
         aps = _evaluate_at_threshold(
-            all_preds, all_gts, n_gt_per_class, num_classes, thresh,
+            processed_preds, processed_gts, n_gt_per_class, num_classes, thresh,
         )
         ap_per_threshold[thresh] = aps
 
@@ -179,7 +208,7 @@ def evaluate_voc(
     return result
 
 
-def _evaluate_at_threshold(all_preds, all_gts, n_gt_per_class, num_classes, iou_threshold):
+def _evaluate_at_threshold(processed_preds, processed_gts, n_gt_per_class, num_classes, iou_threshold):
     """Compute per-class AP at a single IoU threshold.
 
     Returns:
@@ -187,8 +216,8 @@ def _evaluate_at_threshold(all_preds, all_gts, n_gt_per_class, num_classes, iou_
     """
     aps = {}
     for cls_id in range(1, num_classes + 1):
-        preds = all_preds.get(cls_id, [])
-        gts = all_gts.get(cls_id, [])
+        preds = processed_preds.get(cls_id, [])
+        gt_lookup = processed_gts.get(cls_id, {})
         n_gt = n_gt_per_class.get(cls_id, 0)
 
         if n_gt == 0:
@@ -200,24 +229,10 @@ def _evaluate_at_threshold(all_preds, all_gts, n_gt_per_class, num_classes, iou_
             aps[cls_id] = 0.0
             continue
 
-        # Sort predictions by score (descending)
-        preds = sorted(preds, key=lambda x: -x[1])
-
-        # Build GT lookup: image_idx -> (boxes_array, difficults_array, matched_array)
-        gt_by_image = defaultdict(lambda: {"boxes": [], "difficults": [], "matched": []})
-        for img_idx, box, diff in gts:
-            gt_by_image[img_idx]["boxes"].append(box)
-            gt_by_image[img_idx]["difficults"].append(diff)
-            gt_by_image[img_idx]["matched"].append(False)
-
-        # Convert lists to numpy arrays for vectorized IoU
-        gt_lookup = {}
-        for img_idx, data in gt_by_image.items():
-            gt_lookup[img_idx] = {
-                "boxes": np.array(data["boxes"]),           # (G, 4)
-                "difficults": np.array(data["difficults"]),  # (G,)
-                "matched": np.array(data["matched"]),        # (G,)
-            }
+        # Build matched tracking dictionary for this threshold
+        matched_lookup = {}
+        for img_idx, data in gt_lookup.items():
+            matched_lookup[img_idx] = np.zeros(len(data["boxes"]), dtype=bool)
 
         tp = np.zeros(len(preds))
         fp = np.zeros(len(preds))
@@ -237,9 +252,11 @@ def _evaluate_at_threshold(all_preds, all_gts, n_gt_per_class, num_classes, iou_
                 if img_gt["difficults"][best_gt_idx]:
                     # Match with difficult GT: neither TP nor FP (VOC protocol)
                     continue
-                if not img_gt["matched"][best_gt_idx]:
+                
+                matched = matched_lookup[img_idx]
+                if not matched[best_gt_idx]:
                     tp[pred_idx] = 1
-                    img_gt["matched"][best_gt_idx] = True
+                    matched[best_gt_idx] = True
                 else:
                     fp[pred_idx] = 1  # Duplicate detection
             else:
