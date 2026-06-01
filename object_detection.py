@@ -21,6 +21,24 @@ from torch.utils.data import DataLoader
 from torch.amp import autocast
 from torch.amp import GradScaler
 
+# Optional tqdm import
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    class tqdm:
+        def __init__(self, iterable, total=None, desc="", leave=True, **kwargs):
+            self.iterable = iterable
+            self.total = total
+            self.desc = desc
+        def __iter__(self):
+            return iter(self.iterable)
+        def set_postfix(self, *args, **kwargs):
+            pass
+        def set_description(self, *args, **kwargs):
+            pass
+
 # Optional wandb import
 try:
     import wandb
@@ -237,8 +255,8 @@ def parse_args():
         help="Random seed (default: 42)"
     )
     parser.add_argument(
-        "--log-interval", type=int, default=20,
-        help="Log every N batches (default: 20)"
+        "--log-interval", type=int, default=100,
+        help="Log every N batches (default: 100)"
     )
 
     args = parser.parse_args()
@@ -307,7 +325,8 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
     start_time = time.time()
     optimizer.zero_grad()
 
-    for batch_idx, (images, targets) in enumerate(dataloader):
+    pbar = tqdm(enumerate(dataloader), total=num_batches, desc=f"Epoch {epoch}", leave=False)
+    for batch_idx, (images, targets) in pbar:
         images = images.to(device, non_blocking=True)
         targets = [
             {k: v.to(device, non_blocking=True) for k, v in t.items()}
@@ -368,7 +387,14 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
             wandb.log(log_dict, step=global_step)
 
         # Console logging
-        if (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
+        if HAS_TQDM:
+            pbar.set_postfix({
+                "cls": f"{cls_loss_val:.4f}",
+                "reg": f"{reg_loss_val:.4f}",
+                "tot": f"{total_loss_val:.4f}",
+                "pos": loss_dict["num_pos"],
+            })
+        elif (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
             elapsed = time.time() - start_time
             eta = elapsed / (batch_idx + 1) * (num_batches - batch_idx - 1)
             lr_backbone = optimizer.param_groups[0]["lr"]
@@ -447,7 +473,8 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
 
     optimizer.zero_grad()
 
-    for batch_idx, (images, targets) in enumerate(dataloader):
+    pbar = tqdm(enumerate(dataloader), total=num_batches, desc=f"Epoch {epoch}", leave=False)
+    for batch_idx, (images, targets) in pbar:
         # torchvision expects List[Tensor], not a batched (B, C, H, W) tensor
         image_list = [img.to(device, non_blocking=True) for img in images.unbind(0)]
         target_list = _prepare_maskrcnn_targets(targets, device)
@@ -510,7 +537,14 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
                 log_dict["train/grad_norm"] = grad_norm
             wandb.log(log_dict, step=global_step)
 
-        if (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
+        if HAS_TQDM:
+            pbar.set_postfix({
+                "tot": f"{total_loss_val:.4f}",
+                "cls": f"{cls_loss_val:.4f}",
+                "box": f"{box_loss_val:.4f}",
+                "mask": f"{mask_loss_val:.4f}",
+            })
+        elif (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
             elapsed = time.time() - start_time
             eta = elapsed / (batch_idx + 1) * (num_batches - batch_idx - 1)
             logger.info(
@@ -558,7 +592,8 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
     logger.info("Running evaluation...")
     start_time = time.time()
 
-    for batch_idx, (images, targets) in enumerate(dataloader):
+    pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc="Evaluating", leave=False)
+    for batch_idx, (images, targets) in pbar:
         images = images.to(device, non_blocking=True)
 
         # Get predictions (use AMP for faster inference)
@@ -587,7 +622,7 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
                 score_thresh=0.3,
             )
 
-        if (batch_idx + 1) % 50 == 0:
+        if not HAS_TQDM and (batch_idx + 1) % args.log_interval == 0:
             logger.info(f"  Eval batch {batch_idx+1}/{len(dataloader)}")
 
     elapsed = time.time() - start_time

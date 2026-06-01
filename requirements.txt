@@ -24,3 +24,4 @@ nvidia-ml-py        # GPU energy monitoring (replaces deprecated pynvml)
 #  Experiment tracking (optional)
 # ============================================================
 wandb             # Weights & Biases logging
+tqdm              # Progress bars for training and validation
