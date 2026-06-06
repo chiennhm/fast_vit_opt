@@ -135,24 +135,16 @@ class COCODetectionDataset(Dataset):
             return mask
 
         if isinstance(seg, list):
-            # Polygon format — rasterise with numpy
+            # Polygon format — rasterise with PIL ImageDraw (no cv2 dependency)
+            from PIL import ImageDraw
             mask = np.zeros((img_h, img_w), dtype=np.uint8)
-            try:
-                import cv2
-                for poly in seg:
-                    pts = np.array(poly, dtype=np.float32).reshape(-1, 2)
-                    pts = pts.astype(np.int32)
-                    cv2.fillPoly(mask, [pts], 1)
-            except ImportError:
-                # cv2 not available — use PIL ImageDraw fallback
-                from PIL import ImageDraw
-                m_img = Image.fromarray(mask)
-                draw = ImageDraw.Draw(m_img)
-                for poly in seg:
-                    pts = list(zip(poly[0::2], poly[1::2]))
-                    if len(pts) >= 3:
-                        draw.polygon(pts, fill=1)
-                mask = np.array(m_img, dtype=np.uint8)
+            m_img = Image.fromarray(mask)
+            draw = ImageDraw.Draw(m_img)
+            for poly in seg:
+                pts = list(zip(poly[0::2], poly[1::2]))
+                if len(pts) >= 3:
+                    draw.polygon(pts, fill=1)
+            mask = np.array(m_img, dtype=np.uint8)
             return mask
 
         # RLE format (dict with 'counts' and 'size')
