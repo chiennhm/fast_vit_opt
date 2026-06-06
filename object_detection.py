@@ -848,11 +848,16 @@ def main():
     )
 
     # 3. Kết nối chúng lại
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, main_scheduler],
-        milestones=[warmup_iters]
-    )
+    # SequentialLR.__init__ calls .step() internally, triggering a harmless
+    # "lr_scheduler.step() before optimizer.step()" warning — suppress it.
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "Detected call of `lr_scheduler.step\\(\\)` before", UserWarning)
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, main_scheduler],
+            milestones=[warmup_iters]
+        )
 
     scaler = GradScaler('cuda') if args.amp and device.type == "cuda" else None
 
