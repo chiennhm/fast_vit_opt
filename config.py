@@ -215,6 +215,9 @@ class TrainConfig:
     seed: int = 42
     """Random seed for reproducibility."""
 
+    cache_ram: bool = False
+    """Preload dataset images and annotations to RAM to avoid disk I/O bottlenecks."""
+
     # AMP
     amp: bool = True
     """Use automatic mixed-precision (FP16) training."""

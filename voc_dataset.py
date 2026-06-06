@@ -64,6 +64,7 @@ class VOCDetectionDataset(Dataset):
         img_size=512,
         augment=True,
         download=True,
+        cache_ram=False,
     ):
         """
         Args:
@@ -73,14 +74,11 @@ class VOCDetectionDataset(Dataset):
             img_size: target image size (square)
             augment: apply data augmentation
             download: auto-download if not present
+            cache_ram: preload dataset to RAM
         """
         self.root = root
         self.img_size = img_size
         self.augment = augment
-
-        # ImageNet normalization
-        self.mean = [0.485, 0.456, 0.406]
-        self.std = [0.229, 0.224, 0.225]
 
         # Collect all image entries
         self.entries = []
@@ -102,6 +100,32 @@ class VOCDetectionDataset(Dataset):
                     print(f"Warning: Could not load VOC{year} {image_set}: {e}")
 
         print(f"VOC Dataset: {len(self.entries)} images loaded")
+
+        self.cache_ram = cache_ram
+        if self.cache_ram:
+            print(f"Caching VOC dataset (augment={augment}) to RAM...")
+            self.cached_images = []
+            self.cached_annotations = []
+            try:
+                from tqdm import tqdm
+                pbar = tqdm(self.entries, desc=f"Caching VOC {'trainval' if augment else 'val'} to RAM")
+            except ImportError:
+                pbar = self.entries
+
+            for img_path, ann_path in pbar:
+                with open(img_path, "rb") as f:
+                    img_bytes = f.read()
+                self.cached_images.append(img_bytes)
+
+                boxes, labels, difficults = self._parse_annotation(ann_path)
+                self.cached_annotations.append((boxes, labels, difficults))
+
+        # ImageNet normalization
+        self.mean = [0.485, 0.456, 0.406]
+        self.std = [0.229, 0.224, 0.225]
+
+        # Collect all image entries already populated above in __init__ for caching
+        pass
 
     def __len__(self):
         return len(self.entries)
@@ -146,14 +170,17 @@ class VOCDetectionDataset(Dataset):
         return boxes, labels, difficults
 
     def __getitem__(self, idx):
-        img_path, ann_path = self.entries[idx]
-
-        # Load image
-        image = Image.open(img_path).convert("RGB")
-        orig_w, orig_h = image.size
-
-        # Parse annotation (includes difficult objects)
-        boxes, labels, difficults = self._parse_annotation(ann_path)
+        if self.cache_ram:
+            import io
+            img_bytes = self.cached_images[idx]
+            image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            boxes, labels, difficults = self.cached_annotations[idx]
+        else:
+            img_path, ann_path = self.entries[idx]
+            # Load image
+            image = Image.open(img_path).convert("RGB")
+            # Parse annotation (includes difficult objects)
+            boxes, labels, difficults = self._parse_annotation(ann_path)
 
         if len(boxes) == 0:
             boxes = np.zeros((0, 4), dtype=np.float32)
@@ -343,7 +370,7 @@ def detection_collate(batch):
     return images, targets
 
 
-def build_voc_datasets(data_dir="./data", img_size=512, download=True):
+def build_voc_datasets(data_dir="./data", img_size=512, download=True, cache_ram=False):
     """Build train and validation VOC datasets.
 
     Train: VOC2007 trainval + VOC2012 trainval
@@ -353,6 +380,7 @@ def build_voc_datasets(data_dir="./data", img_size=512, download=True):
         data_dir: root data directory
         img_size: input image size
         download: auto-download datasets
+        cache_ram: preload dataset to RAM
 
     Returns:
         train_dataset, val_dataset
@@ -364,6 +392,7 @@ def build_voc_datasets(data_dir="./data", img_size=512, download=True):
         img_size=img_size,
         augment=True,
         download=download,
+        cache_ram=cache_ram,
     )
 
     # VOC2007 val is used for evaluation
@@ -375,6 +404,7 @@ def build_voc_datasets(data_dir="./data", img_size=512, download=True):
         img_size=img_size,
         augment=False,
         download=download,
+        cache_ram=cache_ram,
     )
 
     return train_dataset, val_dataset

@@ -80,6 +80,7 @@ class COCODetectionDataset(Dataset):
         ann_file,
         img_size=512,
         augment=True,
+        cache_ram=False,
     ):
         """
         Args:
@@ -87,6 +88,7 @@ class COCODetectionDataset(Dataset):
             ann_file: Path to COCO JSON annotations.
             img_size: Target image size (square).
             augment: Apply data augmentation.
+            cache_ram: Preload dataset to RAM.
         """
         self.img_dir = img_dir
         self.img_size = img_size
@@ -110,6 +112,30 @@ class COCODetectionDataset(Dataset):
 
         self.img_ids = list(self.images.keys())
         print(f"COCO Dataset: {len(self.img_ids)} images, {len(coco_data['annotations'])} annotations loaded")
+
+        self.cache_ram = cache_ram
+        if self.cache_ram:
+            print(f"Caching COCO dataset (augment={augment}) to RAM...")
+            self.cached_images = []
+            self.cached_annotations = []
+            try:
+                from tqdm import tqdm
+                pbar = tqdm(self.img_ids, desc=f"Caching COCO {'train' if augment else 'val'} to RAM")
+            except ImportError:
+                pbar = self.img_ids
+
+            for img_id in pbar:
+                img_info = self.images[img_id]
+                file_name = img_info["file_name"]
+                img_path = os.path.join(self.img_dir, file_name)
+                with open(img_path, "rb") as f:
+                    img_bytes = f.read()
+                self.cached_images.append(img_bytes)
+
+                boxes, labels, iscrowd, masks = self._get_annotations(
+                    img_id, img_h=img_info["height"], img_w=img_info["width"]
+                )
+                self.cached_annotations.append((boxes, labels, iscrowd, masks))
 
     def __len__(self):
         return len(self.img_ids)
@@ -214,19 +240,26 @@ class COCODetectionDataset(Dataset):
         return boxes, labels, iscrowd, masks
 
     def __getitem__(self, idx):
-        img_id = self.img_ids[idx]
-        img_info = self.images[img_id]
-        file_name = img_info["file_name"]
-        img_path = os.path.join(self.img_dir, file_name)
+        if self.cache_ram:
+            import io
+            img_bytes = self.cached_images[idx]
+            image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            boxes, labels, iscrowd, masks = self.cached_annotations[idx]
+            orig_w, orig_h = image.size
+        else:
+            img_id = self.img_ids[idx]
+            img_info = self.images[img_id]
+            file_name = img_info["file_name"]
+            img_path = os.path.join(self.img_dir, file_name)
 
-        # Load image
-        image = Image.open(img_path).convert("RGB")
-        orig_w, orig_h = image.size
+            # Load image
+            image = Image.open(img_path).convert("RGB")
+            orig_w, orig_h = image.size
 
-        # Get annotations (with segmentation masks)
-        boxes, labels, iscrowd, masks = self._get_annotations(
-            img_id, img_h=orig_h, img_w=orig_w
-        )
+            # Get annotations (with segmentation masks)
+            boxes, labels, iscrowd, masks = self._get_annotations(
+                img_id, img_h=orig_h, img_w=orig_w
+            )
 
         if len(boxes) == 0:
             boxes      = np.zeros((0, 4),         dtype=np.float32)
@@ -465,6 +498,7 @@ def build_coco_datasets(
     train_ann_file=None,
     val_img_dir=None,
     val_ann_file=None,
+    cache_ram=False,
 ):
     """Build train and validation COCO datasets.
 
@@ -475,6 +509,7 @@ def build_coco_datasets(
         train_ann_file: Custom path to train annotations.
         val_img_dir: Custom path to val images.
         val_ann_file: Custom path to val annotations.
+        cache_ram: Preload dataset to RAM.
 
     Returns:
         train_dataset, val_dataset
@@ -493,6 +528,7 @@ def build_coco_datasets(
         ann_file=train_ann_file,
         img_size=img_size,
         augment=True,
+        cache_ram=cache_ram,
     )
 
     val_dataset = COCODetectionDataset(
@@ -500,6 +536,7 @@ def build_coco_datasets(
         ann_file=val_ann_file,
         img_size=img_size,
         augment=False,
+        cache_ram=cache_ram,
     )
 
     return train_dataset, val_dataset

@@ -251,6 +251,10 @@ def parse_args():
         help="Number of data loading workers (default: 4)"
     )
     parser.add_argument(
+        "--cache-ram", action="store_true",
+        help="Preload entire dataset images and annotations to RAM to eliminate disk I/O bottlenecks"
+    )
+    parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed (default: 42)"
     )
@@ -737,6 +741,7 @@ def main():
             train_ann_file=args.coco_train_ann,
             val_img_dir=args.coco_val_img,
             val_ann_file=args.coco_val_ann,
+            cache_ram=args.cache_ram,
         )
         collate_fn = coco_collate
     else:
@@ -744,6 +749,7 @@ def main():
             data_dir=args.data_dir,
             img_size=args.img_size,
             download=not args.no_download,
+            cache_ram=args.cache_ram,
         )
         collate_fn = detection_collate
 
