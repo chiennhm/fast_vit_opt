@@ -11,7 +11,6 @@ import argparse
 import os
 import sys
 import time
-import math
 import logging
 from datetime import datetime
 
@@ -139,8 +138,8 @@ def parse_args():
 
     # Training
     parser.add_argument(
-        "--epochs", type=int, default=150,
-        help="Number of training epochs (default: 150)"
+        "--epochs", type=int, default=12,
+        help="Number of training epochs (default: 12, mmdet 1x schedule)"
     )
     parser.add_argument(
         "--batch-size", "-b", type=int, default=16,
@@ -155,8 +154,16 @@ def parse_args():
         help="Weight decay (default: 0.05)"
     )
     parser.add_argument(
-        "--warmup-epochs", type=int, default=5,
-        help="Warmup epochs (default: 5)"
+        "--warmup-iters", type=int, default=500,
+        help="Number of warmup iterations with linear LR ramp (default: 500)"
+    )
+    parser.add_argument(
+        "--lr-steps", nargs="+", type=int, default=[8, 11],
+        help="Epochs at which to decay LR by --lr-gamma (default: 8 11)"
+    )
+    parser.add_argument(
+        "--lr-gamma", type=float, default=0.1,
+        help="LR decay factor at each milestone (default: 0.1)"
     )
     parser.add_argument(
         "--clip-grad", type=float, default=5.0,
@@ -279,33 +286,63 @@ def parse_args():
 
 
 # ============================================================================
-# Learning rate scheduler with warmup + cosine annealing
+# Learning rate scheduler: linear warmup + step decay (mmdet 1x schedule)
 # ============================================================================
-class WarmupCosineScheduler:
-    """Linear warmup followed by cosine annealing."""
+class WarmupStepDecayScheduler:
+    """Linear warmup (iteration-level) followed by step decay (epoch-level).
 
-    def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr_ratio=0.01):
+    Matches the mmdetection 1x schedule:
+      - Linear warmup from ``warmup_start_factor × base_lr`` to ``base_lr``
+        over the first ``warmup_iters`` iterations.
+      - After warmup, LR is decayed by ``gamma`` at each epoch in ``milestones``.
+
+    Args:
+        optimizer: wrapped optimizer.
+        warmup_iters: number of warmup iterations (default: 500).
+        warmup_start_factor: starting LR multiplier (default: 0.001).
+        milestones: list of epoch indices at which LR is decayed.
+        gamma: multiplicative decay factor (default: 0.1).
+    """
+
+    def __init__(
+        self,
+        optimizer,
+        warmup_iters=500,
+        warmup_start_factor=0.001,
+        milestones=(8, 11),
+        gamma=0.1,
+    ):
         self.optimizer = optimizer
-        self.warmup_epochs = warmup_epochs
-        self.total_epochs = total_epochs
+        self.warmup_iters = warmup_iters
+        self.warmup_start_factor = warmup_start_factor
+        self.milestones = sorted(milestones)
+        self.gamma = gamma
         self.base_lrs = [pg["lr"] for pg in optimizer.param_groups]
-        self.min_lrs = [lr * min_lr_ratio for lr in self.base_lrs]
+        self._iter = 0       # global iteration counter
+        self._epoch = -1     # current epoch (set by step_epoch)
 
-    def step(self, epoch):
-        if epoch < self.warmup_epochs:
-            # Linear warmup
-            alpha = (epoch + 1) / max(self.warmup_epochs, 1)
+    def step_epoch(self, epoch):
+        """Call once at the start of each epoch to apply milestone decay."""
+        self._epoch = epoch
+        # Count how many milestones have been passed
+        n_decays = sum(1 for m in self.milestones if epoch >= m)
+        decay = self.gamma ** n_decays
+        for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+            pg["lr"] = base_lr * decay
+
+    def step_iter(self):
+        """Call after every optimizer step during the warmup phase."""
+        self._iter += 1
+        if self._iter <= self.warmup_iters:
+            # Linear interpolation: warmup_start_factor → 1.0
+            alpha = self._iter / self.warmup_iters
+            factor = self.warmup_start_factor + (1.0 - self.warmup_start_factor) * alpha
             for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
-                pg["lr"] = base_lr * alpha
-        else:
-            # Cosine annealing
-            progress = (epoch - self.warmup_epochs) / max(
-                self.total_epochs - self.warmup_epochs, 1
-            )
-            for pg, base_lr, min_lr in zip(self.optimizer.param_groups, self.base_lrs, self.min_lrs):
-                pg["lr"] = min_lr + 0.5 * (base_lr - min_lr) * (
-                    1 + math.cos(math.pi * progress)
-                )
+                pg["lr"] = base_lr * factor
+
+    @property
+    def in_warmup(self):
+        return self._iter < self.warmup_iters
 
     def get_lr(self):
         return [pg["lr"] for pg in self.optimizer.param_groups]
@@ -314,7 +351,7 @@ class WarmupCosineScheduler:
 # ============================================================================
 # Training — FastViT (RetinaNet-style)
 # ============================================================================
-def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, device, epoch, args):
+def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
     """Train FastViT+FPN+RetinaNet for one epoch.
 
     The model outputs (cls_preds, reg_preds, anchors); loss is computed
@@ -353,6 +390,8 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step_iter()
         else:
             cls_preds, reg_preds, anchors = model(images)
             loss_dict = criterion(cls_preds, reg_preds, anchors, targets)
@@ -366,6 +405,8 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
                 optimizer.step()
                 optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step_iter()
 
         batch_size = images.shape[0]
         cls_loss_val = loss_dict["cls_loss"].item()
@@ -460,7 +501,7 @@ def _prepare_maskrcnn_targets(
     return out
 
 
-def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch, args):
+def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
     """Train FastViTMaskRCNN for one epoch.
 
     torchvision Mask R-CNN computes all losses **internally** when called as
@@ -499,6 +540,8 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step_iter()
         else:
             loss_dict = model(image_list, target_list)
             unscaled_loss = sum(loss_dict.values())
@@ -512,6 +555,8 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
                     ).item()
                 optimizer.step()
                 optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step_iter()
 
         batch_size = len(image_list)
         total_loss_val = unscaled_loss.item()
@@ -569,14 +614,14 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
 # ============================================================================
 # Dispatcher — picks correct train function based on arch
 # ============================================================================
-def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epoch, args):
+def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
     """Dispatch to FastViT or Mask R-CNN training loop."""
     if args.arch == "maskrcnn":
         return train_one_epoch_maskrcnn(
-            model, dataloader, optimizer, scaler, device, epoch, args
+            model, dataloader, optimizer, scaler, device, epoch, args, scheduler=scheduler
         )
     return train_one_epoch_fastvit(
-        model, criterion, dataloader, optimizer, scaler, device, epoch, args
+        model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=scheduler
     )
 
 
@@ -862,10 +907,11 @@ def main():
 
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
 
-    scheduler = WarmupCosineScheduler(
+    scheduler = WarmupStepDecayScheduler(
         optimizer,
-        warmup_epochs=args.warmup_epochs,
-        total_epochs=args.epochs,
+        warmup_iters=args.warmup_iters,
+        milestones=args.lr_steps,
+        gamma=args.lr_gamma,
     )
 
     scaler = GradScaler('cuda') if args.amp and device.type == "cuda" else None
@@ -906,20 +952,22 @@ def main():
     logger.info(f"  Epochs:     {args.epochs}")
     logger.info(f"  Batch size: {args.batch_size}")
     logger.info(f"  LR:         {args.lr}")
+    logger.info(f"  LR steps:   {args.lr_steps} (gamma={args.lr_gamma})")
+    logger.info(f"  Warmup:     {args.warmup_iters} iters")
     logger.info(f"  Image size: {args.img_size}")
     logger.info(f"  AMP:        {args.amp}")
     logger.info(f"  Output:     {output_dir}")
     logger.info("=" * 60)
 
     for epoch in range(start_epoch, args.epochs):
-        scheduler.step(epoch)
+        scheduler.step_epoch(epoch)
         lr_backbone = optimizer.param_groups[0]["lr"]
         lr_head = optimizer.param_groups[2]["lr"]
         logger.info(f"\nEpoch {epoch}/{args.epochs - 1} | LR Head: {lr_head:.6f} | LR Backbone: {lr_backbone:.6f}")
 
         # Train
         train_metrics = train_one_epoch(
-            model, criterion, train_loader, optimizer, scaler, device, epoch, args
+            model, criterion, train_loader, optimizer, scaler, device, epoch, args, scheduler=scheduler
         )
 
         logger.info(
