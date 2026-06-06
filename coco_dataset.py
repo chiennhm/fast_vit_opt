@@ -293,8 +293,9 @@ class COCODetectionDataset(Dataset):
                 image, train_boxes, self.img_size, train_masks
             )
             # Filter invalid boxes after _resize
+            new_w, new_h = image.size
             train_boxes, train_labels, train_masks, train_iscrowd = filter_and_clip_boxes(
-                train_boxes, self.img_size, self.img_size, train_labels, train_masks, train_iscrowd
+                train_boxes, new_w, new_h, train_labels, train_masks, train_iscrowd
             )
 
             image = TF.to_tensor(image)
@@ -317,8 +318,9 @@ class COCODetectionDataset(Dataset):
                 image, boxes, self.img_size, masks
             )
             # Filter invalid boxes after _resize
+            new_w, new_h = image.size
             boxes, labels, masks, iscrowd = filter_and_clip_boxes(
-                boxes, self.img_size, self.img_size, labels, masks, iscrowd
+                boxes, new_w, new_h, labels, masks, iscrowd
             )
 
             image = TF.to_tensor(image)
@@ -440,15 +442,32 @@ class COCODetectionDataset(Dataset):
 
         return image, boxes, masks, labels, iscrowd
 
-    def _resize(self, image, boxes, target_size, masks=None):
-        """Resize image, boxes, and masks to target_size × target_size."""
+    def _resize(self, image, boxes, target_size, masks=None, max_size=1333):
+        """Resize image preserving aspect ratio.
+
+        Shortest side is scaled to *target_size* and the longest side is
+        capped at *max_size* (default 1333), following the standard
+        detection convention (800 / 1333).
+        """
         orig_w, orig_h = image.size
 
-        image = image.resize((target_size, target_size), Image.BILINEAR)
+        # Compute scale so that the shortest side == target_size
+        min_side = min(orig_w, orig_h)
+        max_side = max(orig_w, orig_h)
+        scale = target_size / min_side
+
+        # Cap so that the longest side does not exceed max_size
+        if scale * max_side > max_size:
+            scale = max_size / max_side
+
+        new_w = int(round(orig_w * scale))
+        new_h = int(round(orig_h * scale))
+
+        image = image.resize((new_w, new_h), Image.BILINEAR)
 
         if len(boxes) > 0:
-            scale_x = target_size / orig_w
-            scale_y = target_size / orig_h
+            scale_x = new_w / orig_w
+            scale_y = new_h / orig_h
             boxes = boxes.copy()
             boxes[:, 0] *= scale_x
             boxes[:, 1] *= scale_y
@@ -459,16 +478,16 @@ class COCODetectionDataset(Dataset):
             if len(masks) > 0:
                 # Resize each mask using nearest-neighbour to preserve binary values
                 resized = np.zeros(
-                    (masks.shape[0], target_size, target_size), dtype=masks.dtype
+                    (masks.shape[0], new_h, new_w), dtype=masks.dtype
                 )
                 for i, m in enumerate(masks):
                     pil_m = Image.fromarray(m).resize(
-                        (target_size, target_size), Image.NEAREST
+                        (new_w, new_h), Image.NEAREST
                     )
                     resized[i] = np.array(pil_m, dtype=masks.dtype)
                 masks = resized
             else:
-                masks = np.zeros((0, target_size, target_size), dtype=masks.dtype)
+                masks = np.zeros((0, new_h, new_w), dtype=masks.dtype)
 
         if masks is not None:
             return image, boxes, masks
@@ -478,8 +497,12 @@ class COCODetectionDataset(Dataset):
 def coco_collate(batch):
     """Custom collate function for COCO detection.
 
-    Handles variable number of boxes per image.
+    Handles variable number of boxes per image and variable image sizes
+    (aspect-ratio preserving resize produces different-sized tensors).
+    Images are zero-padded to the largest (H, W) in the batch.
     """
+    import torch.nn.functional as F
+
     images = []
     targets = []
 
@@ -487,7 +510,19 @@ def coco_collate(batch):
         images.append(img)
         targets.append(target)
 
-    images = torch.stack(images, dim=0)
+    # Pad images to same size within the batch
+    max_h = max(img.shape[1] for img in images)
+    max_w = max(img.shape[2] for img in images)
+
+    padded = []
+    for img in images:
+        pad_h = max_h - img.shape[1]
+        pad_w = max_w - img.shape[2]
+        if pad_h > 0 or pad_w > 0:
+            img = F.pad(img, (0, pad_w, 0, pad_h), value=0.0)
+        padded.append(img)
+
+    images = torch.stack(padded, dim=0)
     return images, targets
 
 

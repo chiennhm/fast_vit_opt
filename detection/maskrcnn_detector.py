@@ -142,8 +142,8 @@ class FastViTMaskRCNN(nn.Module):
         num_classes: Number of object classes **including background** (e.g. 21 for VOC).
         fpn_out_channels: FPN output channel count. Default: 256.
         pretrained_backbone: Path to ImageNet pretrained FastViT checkpoint. Default: None.
-        min_size: Minimum image side for internal resizing. Default: 512.
-        max_size: Maximum image side for internal resizing. Default: 512.
+        min_size: Minimum image side for internal resizing. Default: 800.
+        max_size: Maximum image side for internal resizing. Default: 1333.
         box_score_thresh: Minimum score for keeping a detection. Default: 0.05.
         box_nms_thresh: NMS IoU threshold. Default: 0.5.
         box_detections_per_img: Max detections per image. Default: 100.
@@ -154,8 +154,8 @@ class FastViTMaskRCNN(nn.Module):
         num_classes: int = 21,
         fpn_out_channels: int = 256,
         pretrained_backbone: Optional[str] = None,
-        min_size: int = 512,
-        max_size: int = 512,
+        min_size: int = 800,
+        max_size: int = 1333,
         box_score_thresh: float = 0.05,
         box_nms_thresh: float = 0.5,
         box_detections_per_img: int = 100,
@@ -224,6 +224,35 @@ class FastViTMaskRCNN(nn.Module):
             rpn_batch_size_per_image=rpn_batch_size_per_image,
             box_batch_size_per_image=box_batch_size_per_image,
         )
+
+        # ── Xavier init for added layers (FPN, RPN, heads) ────────────────
+        self._xavier_init_added_layers()
+
+    def _xavier_init_added_layers(self) -> None:
+        """Apply Xavier uniform init to all added layers (FPN, RPN, box/mask heads).
+
+        The backbone is excluded — it uses pretrained ImageNet weights.
+        Paper specifies Xavier init for all "added layers" on top of the backbone.
+        """
+        # Modules that belong to added layers (everything except backbone.backbone)
+        added_modules = [
+            self.model.backbone.fpn,     # FPN lateral + output convs
+            self.model.rpn,              # RPN head
+            self.model.roi_heads,        # Box head + Mask head
+        ]
+        for parent in added_modules:
+            for m in parent.modules():
+                if isinstance(m, nn.Conv2d):
+                    nn.init.xavier_uniform_(m.weight, gain=nn.init.calculate_gain("relu"))
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
 
     # ──────────────────────────────────────────────────────────────────────
     # Weight loading helpers

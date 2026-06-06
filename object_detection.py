@@ -11,6 +11,7 @@ import argparse
 import os
 import sys
 import time
+import math
 import logging
 from datetime import datetime
 
@@ -102,8 +103,8 @@ def parse_args():
         help="Custom path to COCO validation annotations JSON file"
     )
     parser.add_argument(
-        "--img-size", type=int, default=512,
-        help="Input image size (default: 512)"
+        "--img-size", type=int, default=800,
+        help="Shortest side of input image (default: 800, paper standard)"
     )
     parser.add_argument(
         "--no-download", action="store_true",
@@ -277,6 +278,37 @@ def parse_args():
     return args
 
 
+# ============================================================================
+# Learning rate scheduler with warmup + cosine annealing
+# ============================================================================
+class WarmupCosineScheduler:
+    """Linear warmup followed by cosine annealing."""
+
+    def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr_ratio=0.01):
+        self.optimizer = optimizer
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.base_lrs = [pg["lr"] for pg in optimizer.param_groups]
+        self.min_lrs = [lr * min_lr_ratio for lr in self.base_lrs]
+
+    def step(self, epoch):
+        if epoch < self.warmup_epochs:
+            # Linear warmup
+            alpha = (epoch + 1) / max(self.warmup_epochs, 1)
+            for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+                pg["lr"] = base_lr * alpha
+        else:
+            # Cosine annealing
+            progress = (epoch - self.warmup_epochs) / max(
+                self.total_epochs - self.warmup_epochs, 1
+            )
+            for pg, base_lr, min_lr in zip(self.optimizer.param_groups, self.base_lrs, self.min_lrs):
+                pg["lr"] = min_lr + 0.5 * (base_lr - min_lr) * (
+                    1 + math.cos(math.pi * progress)
+                )
+
+    def get_lr(self):
+        return [pg["lr"] for pg in self.optimizer.param_groups]
 
 
 # ============================================================================
@@ -428,7 +460,7 @@ def _prepare_maskrcnn_targets(
     return out
 
 
-def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
+def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch, args):
     """Train FastViTMaskRCNN for one epoch.
 
     torchvision Mask R-CNN computes all losses **internally** when called as
@@ -467,8 +499,6 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
-                if scheduler is not None:
-                    scheduler.step()
         else:
             loss_dict = model(image_list, target_list)
             unscaled_loss = sum(loss_dict.values())
@@ -482,8 +512,6 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
                     ).item()
                 optimizer.step()
                 optimizer.zero_grad()
-                if scheduler is not None:
-                    scheduler.step()
 
         batch_size = len(image_list)
         total_loss_val = unscaled_loss.item()
@@ -541,11 +569,11 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
 # ============================================================================
 # Dispatcher — picks correct train function based on arch
 # ============================================================================
-def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
+def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epoch, args):
     """Dispatch to FastViT or Mask R-CNN training loop."""
     if args.arch == "maskrcnn":
         return train_one_epoch_maskrcnn(
-            model, dataloader, optimizer, scaler, device, epoch, args, scheduler=scheduler
+            model, dataloader, optimizer, scaler, device, epoch, args
         )
     return train_one_epoch_fastvit(
         model, criterion, dataloader, optimizer, scaler, device, epoch, args
@@ -763,6 +791,8 @@ def main():
             num_classes=maskrcnn_num_classes,
             fpn_out_channels=args.fpn_channels,
             pretrained_backbone=args.pretrained_backbone,
+            min_size=args.img_size,
+            max_size=1333,
             rpn_pre_nms_top_n_train=args.rpn_pre_nms_train,
             rpn_post_nms_top_n_train=args.rpn_post_nms_train,
             rpn_batch_size_per_image=args.rpn_batch_size,
@@ -832,32 +862,11 @@ def main():
 
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
 
-    # 1. Warmup tuyến tính trong 1000 steps (iterations) đầu tiên
-    iters_per_epoch = len(train_loader)
-    warmup_iters = min(1000, iters_per_epoch)
-
-    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.001, total_iters=warmup_iters
+    scheduler = WarmupCosineScheduler(
+        optimizer,
+        warmup_epochs=args.warmup_epochs,
+        total_epochs=args.epochs,
     )
-
-    # 2. MultiStepLR giảm LR ở epoch 8 và 11 (tính theo chuẩn 12 epochs)
-    # Chuyển đổi mốc epoch sang mốc iterations
-    milestones = [8 * iters_per_epoch, 11 * iters_per_epoch]
-    main_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=milestones, gamma=0.1
-    )
-
-    # 3. Kết nối chúng lại
-    # SequentialLR.__init__ calls .step() internally, triggering a harmless
-    # "lr_scheduler.step() before optimizer.step()" warning — suppress it.
-    import warnings
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "Detected call of `lr_scheduler.step\\(\\)` before", UserWarning)
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[warmup_scheduler, main_scheduler],
-            milestones=[warmup_iters]
-        )
 
     scaler = GradScaler('cuda') if args.amp and device.type == "cuda" else None
 
@@ -902,23 +911,15 @@ def main():
     logger.info(f"  Output:     {output_dir}")
     logger.info("=" * 60)
 
-    # Đóng băng BatchNorm (quan trọng khi batch-size nhỏ, vd: 2)
-    def set_bn_eval(m):
-        if isinstance(m, nn.BatchNorm2d):
-            m.eval()
-            m.weight.requires_grad = False
-            m.bias.requires_grad = False
-
-    model.apply(set_bn_eval)
-
     for epoch in range(start_epoch, args.epochs):
+        scheduler.step(epoch)
         lr_backbone = optimizer.param_groups[0]["lr"]
         lr_head = optimizer.param_groups[2]["lr"]
         logger.info(f"\nEpoch {epoch}/{args.epochs - 1} | LR Head: {lr_head:.6f} | LR Backbone: {lr_backbone:.6f}")
 
         # Train
         train_metrics = train_one_epoch(
-            model, criterion, train_loader, optimizer, scaler, device, epoch, args, scheduler=scheduler
+            model, criterion, train_loader, optimizer, scaler, device, epoch, args
         )
 
         logger.info(
