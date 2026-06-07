@@ -159,6 +159,23 @@ def parse_args():
         help="Warmup epochs (default: 5)"
     )
     parser.add_argument(
+        "--warmup-iters", type=int, default=None,
+        help="Warmup iterations (default: None, overrides warmup-epochs if set)"
+    )
+    parser.add_argument(
+        "--scheduler", type=str, default="step",
+        choices=["step", "cosine"],
+        help="LR scheduler type: 'step' (warmup + step decay) or 'cosine' (warmup + cosine annealing). Default: step"
+    )
+    parser.add_argument(
+        "--lr-steps", nargs="+", type=int, default=[8, 11],
+        help="Epochs at which to decay LR by --lr-gamma (default: 8 11)"
+    )
+    parser.add_argument(
+        "--lr-gamma", type=float, default=0.1,
+        help="LR decay factor at each milestone (default: 0.1)"
+    )
+    parser.add_argument(
         "--clip-grad", type=float, default=5.0,
         help="Gradient clipping norm (default: 5.0)"
     )
@@ -279,10 +296,10 @@ def parse_args():
 
 
 # ============================================================================
-# Learning rate scheduler with warmup + cosine annealing
+# Learning rate schedulers
 # ============================================================================
 class WarmupCosineScheduler:
-    """Linear warmup followed by cosine annealing."""
+    """Linear warmup followed by cosine annealing (epoch-level)."""
 
     def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr_ratio=0.01):
         self.optimizer = optimizer
@@ -291,7 +308,7 @@ class WarmupCosineScheduler:
         self.base_lrs = [pg["lr"] for pg in optimizer.param_groups]
         self.min_lrs = [lr * min_lr_ratio for lr in self.base_lrs]
 
-    def step(self, epoch):
+    def step_epoch(self, epoch):
         if epoch < self.warmup_epochs:
             # Linear warmup
             alpha = (epoch + 1) / max(self.warmup_epochs, 1)
@@ -307,6 +324,52 @@ class WarmupCosineScheduler:
                     1 + math.cos(math.pi * progress)
                 )
 
+    def step_iter(self):
+        pass
+
+    def get_lr(self):
+        return [pg["lr"] for pg in self.optimizer.param_groups]
+
+
+class WarmupStepDecayScheduler:
+    """Linear warmup (iteration-level) followed by step decay (epoch-level)."""
+
+    def __init__(
+        self,
+        optimizer,
+        warmup_iters=500,
+        warmup_start_factor=0.001,
+        milestones=(8, 11),
+        gamma=0.1,
+    ):
+        self.optimizer = optimizer
+        self.warmup_iters = warmup_iters
+        self.warmup_start_factor = warmup_start_factor
+        self.milestones = sorted(milestones)
+        self.gamma = gamma
+        self.base_lrs = [pg["lr"] for pg in optimizer.param_groups]
+        self._iter = 0       # global iteration counter
+        self._epoch = -1     # current epoch
+
+    def step_epoch(self, epoch):
+        self._epoch = epoch
+        n_decays = sum(1 for m in self.milestones if epoch >= m)
+        decay = self.gamma ** n_decays
+        for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+            epoch_lr = base_lr * decay
+            if self._iter >= self.warmup_iters:
+                pg["lr"] = epoch_lr
+
+    def step_iter(self):
+        self._iter += 1
+        if self._iter <= self.warmup_iters:
+            alpha = self._iter / self.warmup_iters
+            factor = self.warmup_start_factor + (1.0 - self.warmup_start_factor) * alpha
+            n_decays = sum(1 for m in self.milestones if self._epoch >= m)
+            decay = self.gamma ** n_decays
+            for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+                pg["lr"] = base_lr * decay * factor
+
     def get_lr(self):
         return [pg["lr"] for pg in self.optimizer.param_groups]
 
@@ -314,7 +377,7 @@ class WarmupCosineScheduler:
 # ============================================================================
 # Training — FastViT (RetinaNet-style)
 # ============================================================================
-def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, device, epoch, args):
+def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
     """Train FastViT+FPN+RetinaNet for one epoch.
 
     The model outputs (cls_preds, reg_preds, anchors); loss is computed
@@ -353,6 +416,8 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step_iter()
         else:
             cls_preds, reg_preds, anchors = model(images)
             loss_dict = criterion(cls_preds, reg_preds, anchors, targets)
@@ -366,6 +431,8 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
                 optimizer.step()
                 optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step_iter()
 
         batch_size = images.shape[0]
         cls_loss_val = loss_dict["cls_loss"].item()
@@ -460,7 +527,7 @@ def _prepare_maskrcnn_targets(
     return out
 
 
-def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch, args):
+def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
     """Train FastViTMaskRCNN for one epoch.
 
     torchvision Mask R-CNN computes all losses **internally** when called as
@@ -499,6 +566,8 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step_iter()
         else:
             loss_dict = model(image_list, target_list)
             unscaled_loss = sum(loss_dict.values())
@@ -512,6 +581,8 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
                     ).item()
                 optimizer.step()
                 optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step_iter()
 
         batch_size = len(image_list)
         total_loss_val = unscaled_loss.item()
@@ -569,14 +640,14 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
 # ============================================================================
 # Dispatcher — picks correct train function based on arch
 # ============================================================================
-def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epoch, args):
+def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
     """Dispatch to FastViT or Mask R-CNN training loop."""
     if args.arch == "maskrcnn":
         return train_one_epoch_maskrcnn(
-            model, dataloader, optimizer, scaler, device, epoch, args
+            model, dataloader, optimizer, scaler, device, epoch, args, scheduler=scheduler
         )
     return train_one_epoch_fastvit(
-        model, criterion, dataloader, optimizer, scaler, device, epoch, args
+        model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=scheduler
     )
 
 
@@ -862,11 +933,36 @@ def main():
 
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
 
-    scheduler = WarmupCosineScheduler(
-        optimizer,
-        warmup_epochs=args.warmup_epochs,
-        total_epochs=args.epochs,
-    )
+    # Resolve warmup/scheduler configuration
+    if args.scheduler == "step":
+        warmup_iters = args.warmup_iters if args.warmup_iters is not None else 500
+        scheduler = WarmupStepDecayScheduler(
+            optimizer,
+            warmup_iters=warmup_iters,
+            milestones=args.lr_steps,
+            gamma=args.lr_gamma,
+        )
+        logger.info(
+            f"Using step scheduler: warmup_iters={warmup_iters}, milestones={args.lr_steps}, gamma={args.lr_gamma}"
+        )
+    else:
+        iters_per_epoch = len(train_loader)
+        if args.warmup_iters is not None:
+            if args.warmup_iters > 0:
+                warmup_epochs = max(1, int(round(args.warmup_iters / iters_per_epoch)))
+            else:
+                warmup_epochs = 0
+            logger.info(f"Using warmup-iters={args.warmup_iters} -> warmup-epochs={warmup_epochs}")
+        else:
+            warmup_epochs = args.warmup_epochs
+            logger.info(f"Using warmup-epochs={warmup_epochs}")
+
+        scheduler = WarmupCosineScheduler(
+            optimizer,
+            warmup_epochs=warmup_epochs,
+            total_epochs=args.epochs,
+        )
+        logger.info(f"Using cosine scheduler: warmup_epochs={warmup_epochs}, total_epochs={args.epochs}")
 
     scaler = GradScaler('cuda') if args.amp and device.type == "cuda" else None
 
@@ -912,14 +1008,14 @@ def main():
     logger.info("=" * 60)
 
     for epoch in range(start_epoch, args.epochs):
-        scheduler.step(epoch)
+        scheduler.step_epoch(epoch)
         lr_backbone = optimizer.param_groups[0]["lr"]
         lr_head = optimizer.param_groups[2]["lr"]
         logger.info(f"\nEpoch {epoch}/{args.epochs - 1} | LR Head: {lr_head:.6f} | LR Backbone: {lr_backbone:.6f}")
 
         # Train
         train_metrics = train_one_epoch(
-            model, criterion, train_loader, optimizer, scaler, device, epoch, args
+            model, criterion, train_loader, optimizer, scaler, device, epoch, args, scheduler=scheduler
         )
 
         logger.info(
