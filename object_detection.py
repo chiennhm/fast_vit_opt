@@ -838,7 +838,7 @@ def main():
         # FastViTMaskRCNN exposes a helper for this
         param_groups = model.get_param_groups(
             base_lr=args.lr,
-            backbone_lr_scale=0.1,
+            backbone_lr_scale=1.0,
             weight_decay=args.weight_decay,
         )
     else:
@@ -854,8 +854,8 @@ def main():
             else:
                 (backbone_decay_params if is_backbone else decay_params).append(param)
         param_groups = [
-            {"params": backbone_decay_params,    "weight_decay": args.weight_decay, "lr": args.lr * 0.1},
-            {"params": backbone_no_decay_params, "weight_decay": 0.0,               "lr": args.lr * 0.1},
+            {"params": backbone_decay_params,    "weight_decay": args.weight_decay, "lr": args.lr},
+            {"params": backbone_no_decay_params, "weight_decay": 0.0,               "lr": args.lr},
             {"params": decay_params,             "weight_decay": args.weight_decay, "lr": args.lr},
             {"params": no_decay_params,          "weight_decay": 0.0,               "lr": args.lr},
         ]
