@@ -406,7 +406,7 @@ class FastViTMaskRCNN(nn.Module):
     def get_param_groups(
         self,
         base_lr: float = 1e-4,
-        backbone_lr_scale: float = 0.1,
+        backbone_lr_scale: float = 1,
         weight_decay: float = 0.05,
     ) -> List[Dict]:
         """Return optimizer parameter groups with separate LR for backbone vs head.
