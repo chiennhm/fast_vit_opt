@@ -52,7 +52,7 @@ import numpy as np
 from detection.fastvit_detector import FastViTDetector
 from detection.maskrcnn_detector import FastViTMaskRCNN
 from detection.losses import DetectionLoss
-from detection.eval_voc import evaluate_voc, print_eval_results
+from detection.eval_coco import evaluate_coco, print_eval_results
 from detection.visualize import save_detection_results, VOC_CLASSES
 from voc_dataset import build_voc_datasets, detection_collate
 from coco_dataset import build_coco_datasets, coco_collate, COCO_CLASSES
@@ -713,7 +713,7 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
         class_names = VOC_CLASSES
         iou_threshold = 0.5
 
-    results = evaluate_voc(
+    results = evaluate_coco(
         all_predictions,
         all_ground_truths,
         num_classes=num_classes,
