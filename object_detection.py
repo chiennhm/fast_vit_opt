@@ -682,8 +682,22 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
                 images, score_thresh=0.05, nms_thresh=0.5, max_detections=200
             )
 
-        all_predictions.extend(predictions)
-        all_ground_truths.extend(targets)
+        # Convert predictions to CPU and detach to free VRAM/RAM
+        for pred in predictions:
+            clean_pred = {
+                k: v.cpu().detach() if isinstance(v, torch.Tensor) else v
+                for k, v in pred.items()
+            }
+            all_predictions.append(clean_pred)
+
+        # Convert ground truths to CPU, detach, and remove large "masks" key to save RAM
+        for gt in targets:
+            clean_gt = {
+                k: v.cpu().detach() if isinstance(v, torch.Tensor) else v
+                for k, v in gt.items()
+                if k != "masks"
+            }
+            all_ground_truths.append(clean_gt)
 
         # Save visualizations for first few batches
         if save_vis and output_dir and batch_idx < 5:
