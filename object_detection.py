@@ -184,8 +184,8 @@ def parse_args():
         help="Number of steps to accumulate gradients (default: 1)"
     )
     parser.add_argument(
-        "--rpn-pre-nms-train", type=int, default=1000,
-        help="RPN pre-NMS proposals to keep during training (default: 1000)"
+        "--rpn-pre-nms-train", type=int, default=2000,
+        help="RPN pre-NMS proposals to keep during training (default: 2000)"
     )
     parser.add_argument(
         "--rpn-post-nms-train", type=int, default=1000,
@@ -196,8 +196,8 @@ def parse_args():
         help="Anchors sampled per image for RPN loss calculation (default: 128)"
     )
     parser.add_argument(
-        "--box-batch-size", type=int, default=128,
-        help="Proposals sampled per image for Box/Mask heads loss (default: 128)"
+        "--box-batch-size", type=int, default=512,
+        help="Proposals sampled per image for Box/Mask heads loss (default: 512)"
     )
 
     # Loss
@@ -976,6 +976,10 @@ def main():
         start_epoch, best_map = load_checkpoint(
             args.resume, model, optimizer, scaler
         )
+        # Prevent scheduler from repeating warmup when resuming
+        if start_epoch > 0 and args.scheduler == "step":
+            scheduler._iter = start_epoch * len(train_loader)
+            logger.info(f"Fast-forwarded step scheduler to iteration {scheduler._iter}")
 
     # ========================================================================
     # Eval only mode

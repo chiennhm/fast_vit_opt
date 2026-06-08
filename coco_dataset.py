@@ -499,7 +499,7 @@ def coco_collate(batch):
 
     Handles variable number of boxes per image and variable image sizes
     (aspect-ratio preserving resize produces different-sized tensors).
-    Images are zero-padded to the largest (H, W) in the batch.
+    Images are zero-padded to the nearest multiple of 32.
     """
     import torch.nn.functional as F
 
@@ -510,9 +510,11 @@ def coco_collate(batch):
         images.append(img)
         targets.append(target)
 
-    # Pad images to same size within the batch
+    # Pad images to same size (multiple of 32) within the batch
     max_h = max(img.shape[1] for img in images)
     max_w = max(img.shape[2] for img in images)
+    max_h = ((max_h + 31) // 32) * 32
+    max_w = ((max_w + 31) // 32) * 32
 
     padded = []
     for img in images:
