@@ -81,6 +81,7 @@ class COCODetectionDataset(Dataset):
         img_size=512,
         augment=True,
         cache_ram=False,
+        load_masks=True,
     ):
         """
         Args:
@@ -89,10 +90,17 @@ class COCODetectionDataset(Dataset):
             img_size: Target image size (square).
             augment: Apply data augmentation.
             cache_ram: Preload dataset to RAM.
+            load_masks: If False, skip segmentation decoding entirely and
+                return empty (0, H, W) mask tensors. Set this to False for
+                bbox-only mAP evaluation (e.g. via pycocotools COCOeval on
+                boxes) to avoid the very large RAM/CPU cost of rasterising
+                full-resolution masks for every annotation, especially on
+                COCO images with hundreds of instances.
         """
         self.img_dir = img_dir
         self.img_size = img_size
         self.augment = augment
+        self.load_masks = load_masks
 
         # ImageNet normalization
         self.mean = [0.485, 0.456, 0.406]
@@ -235,7 +243,14 @@ class COCODetectionDataset(Dataset):
                 boxes.append([x1, y1, x2, y2])
                 labels.append(COCO_CAT_TO_IDX[cat_id])
                 iscrowd.append(int(ann.get("iscrowd", 0)))
-                masks.append(self._decode_mask(ann, img_h, img_w))
+                if self.load_masks:
+                    masks.append(self._decode_mask(ann, img_h, img_w))
+                else:
+                    # Bbox-only mode: skip the expensive full-resolution
+                    # polygon/RLE rasterisation entirely.  A 1×1 placeholder
+                    # is used; __getitem__ will build a proper-shaped empty
+                    # tensor from it.
+                    masks.append(np.zeros((1, 1), dtype=np.uint8))
 
         return boxes, labels, iscrowd, masks
 
@@ -314,9 +329,16 @@ class COCODetectionDataset(Dataset):
             }
         else:
             # Eval: keep all
-            image, boxes, masks = self._resize(
-                image, boxes, self.img_size, masks
-            )
+            if self.load_masks:
+                image, boxes, masks = self._resize(
+                    image, boxes, self.img_size, masks
+                )
+            else:
+                # Bbox-only eval: don't resize masks to full image
+                # resolution (that's the expensive part). Resize image/boxes
+                # only, then build a tiny placeholder mask tensor.
+                image, boxes = self._resize(image, boxes, self.img_size)
+                masks = np.zeros((len(boxes), 1, 1), dtype=np.uint8)
             # Filter invalid boxes after _resize
             new_w, new_h = image.size
             boxes, labels, masks, iscrowd = filter_and_clip_boxes(
@@ -536,6 +558,7 @@ def build_coco_datasets(
     val_img_dir=None,
     val_ann_file=None,
     cache_ram=False,
+    val_load_masks=False,
 ):
     """Build train and validation COCO datasets.
 
@@ -547,6 +570,14 @@ def build_coco_datasets(
         val_img_dir: Custom path to val images.
         val_ann_file: Custom path to val annotations.
         cache_ram: Preload dataset to RAM.
+        val_load_masks: If False (default), the validation dataset skips
+            full-resolution mask decoding entirely. The eval/mAP path in
+            object_detection.py only uses boxes/labels/iscrowd for
+            pycocotools bbox mAP, so decoding masks for every validation
+            annotation is pure overhead — and on COCO images with many
+            instances, the per-image RAM/CPU cost can spike badly. Set to
+            True only if you actually need segmentation masks out of the
+            val dataloader (e.g. for visualizing or scoring segm mAP).
 
     Returns:
         train_dataset, val_dataset
@@ -574,6 +605,7 @@ def build_coco_datasets(
         img_size=img_size,
         augment=False,
         cache_ram=cache_ram,
+        load_masks=val_load_masks,
     )
 
     return train_dataset, val_dataset

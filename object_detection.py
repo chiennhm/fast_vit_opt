@@ -8,6 +8,7 @@
 #
 
 import argparse
+import gc
 import os
 import sys
 import time
@@ -228,6 +229,16 @@ def parse_args():
     parser.add_argument(
         "--eval-only", action="store_true",
         help="Only run evaluation on the validation set"
+    )
+    parser.add_argument(
+        "--eval-batch-size", type=int, default=None,
+        help="Batch size for evaluation (default: min(batch_size, 4)). "
+             "Use a smaller value than training batch size to avoid OOM."
+    )
+    parser.add_argument(
+        "--max-eval-samples", type=int, default=None,
+        help="Maximum number of validation samples to evaluate (default: all). "
+             "Useful for quick sanity checks or machines with limited RAM."
     )
 
     # Output
@@ -654,50 +665,78 @@ def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epo
 # ============================================================================
 # Evaluation
 # ============================================================================
+
+# Number of batches between CUDA cache clears during evaluation.
+# Keeps VRAM fragmentation in check without excessive overhead.
+_EVAL_CACHE_CLEAR_INTERVAL = 50
+
+
 @torch.inference_mode()
 def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
-    """Evaluate model on validation set."""
+    """Evaluate model on validation set.
+
+    Memory-optimised evaluation loop:
+    - Converts tensors to numpy immediately to release torch/CUDA memory.
+    - Periodically calls ``torch.cuda.empty_cache()`` + ``gc.collect()``.
+    - Respects ``args.max_eval_samples`` to cap the number of images.
+    """
     model.eval()
 
     all_predictions = []
     all_ground_truths = []
 
     use_amp = args.amp and device.type == "cuda"
+    max_eval_samples = getattr(args, "max_eval_samples", None)
+    total_batches = len(dataloader)
+    total_images_seen = 0
 
     logger.info("Running evaluation...")
+    if max_eval_samples is not None:
+        logger.info(f"  Max eval samples capped at {max_eval_samples}")
     start_time = time.time()
 
-    pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc="Evaluating", leave=False)
+    pbar = tqdm(enumerate(dataloader), total=total_batches, desc="Evaluating", leave=False)
     for batch_idx, (images, targets) in pbar:
+        # Early exit if we have collected enough samples
+        if max_eval_samples is not None and total_images_seen >= max_eval_samples:
+            break
+
         images = images.to(device, non_blocking=True)
 
         # Get predictions (use AMP for faster inference)
         if use_amp:
             with autocast('cuda'):
                 predictions = model.predict(
-                    images, score_thresh=0.05, nms_thresh=0.5, max_detections=200
+                    images, score_thresh=0.05, nms_thresh=0.5, max_detections=100
                 )
         else:
             predictions = model.predict(
-                images, score_thresh=0.05, nms_thresh=0.5, max_detections=200
+                images, score_thresh=0.05, nms_thresh=0.5, max_detections=100
             )
 
-        # Convert predictions to CPU and detach to free VRAM/RAM
+        # Convert predictions to numpy immediately to release CUDA/torch memory
         for pred in predictions:
-            clean_pred = {
-                k: v.cpu().detach() if isinstance(v, torch.Tensor) else v
-                for k, v in pred.items()
-            }
+            clean_pred = {}
+            for k, v in pred.items():
+                if isinstance(v, torch.Tensor):
+                    clean_pred[k] = v.detach().cpu().numpy()
+                else:
+                    clean_pred[k] = v
             all_predictions.append(clean_pred)
 
-        # Convert ground truths to CPU, detach, and remove large "masks" key to save RAM
+        # Convert ground truths to numpy; drop large keys (masks) to save RAM
         for gt in targets:
-            clean_gt = {
-                k: v.cpu().detach() if isinstance(v, torch.Tensor) else v
-                for k, v in gt.items()
-                if k != "masks"
-            }
+            clean_gt = {}
+            for k, v in gt.items():
+                if k == "masks":
+                    continue
+                if isinstance(v, torch.Tensor):
+                    clean_gt[k] = v.detach().cpu().numpy()
+                else:
+                    clean_gt[k] = v
             all_ground_truths.append(clean_gt)
+
+        total_images_seen += images.shape[0]
 
         # Save visualizations for first few batches
         if save_vis and output_dir and batch_idx < 5:
@@ -711,11 +750,28 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
                 score_thresh=0.3,
             )
 
+        # Release GPU references from this batch and clear cache periodically
+        del images, targets, predictions
+        if device.type == "cuda" and (batch_idx + 1) % _EVAL_CACHE_CLEAR_INTERVAL == 0:
+            torch.cuda.empty_cache()
+            gc.collect()
+
         if not HAS_TQDM and (batch_idx + 1) % args.log_interval == 0:
-            logger.info(f"  Eval batch {batch_idx+1}/{len(dataloader)}")
+            elapsed_so_far = time.time() - start_time
+            speed = total_images_seen / max(elapsed_so_far, 1e-6)
+            remaining = (total_batches - batch_idx - 1) * (elapsed_so_far / (batch_idx + 1))
+            logger.info(
+                f"  Eval batch {batch_idx+1}/{total_batches}  "
+                f"({total_images_seen} imgs, {speed:.1f} img/s, ETA {remaining:.0f}s)"
+            )
+
+    # Final cache clear before mAP computation
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
 
     elapsed = time.time() - start_time
-    logger.info(f"Evaluation completed in {elapsed:.1f}s")
+    logger.info(f"Evaluation inference completed in {elapsed:.1f}s ({total_images_seen} images)")
 
     # Compute mAP
     if args.dataset == "coco":
@@ -734,6 +790,10 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
         iou_threshold=iou_threshold,
         class_names=class_names,
     )
+
+    # Free the large prediction/gt lists after mAP is computed
+    del all_predictions, all_ground_truths
+    gc.collect()
 
     return results
 
@@ -848,11 +908,15 @@ def main():
         drop_last=True,
     )
 
+    # Use a separate (smaller) batch size for evaluation to avoid OOM.
+    eval_bs = args.eval_batch_size if args.eval_batch_size is not None else min(args.batch_size, 4)
+    logger.info(f"Eval batch size: {eval_bs}  (train batch size: {args.batch_size})")
+
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
+        batch_size=eval_bs,
         shuffle=False,
-        num_workers=args.workers,
+        num_workers=min(args.workers, 2),  # fewer workers for eval saves RAM
         collate_fn=collate_fn,
         pin_memory=True,
     )

@@ -132,3 +132,22 @@ dmypy.json
 **/.DS_Store
 
 *.pth
+*.pth.tar
+
+# Training and Evaluation Outputs
+output/
+data/
+wandb/
+
+# Report generated files
+report.zip
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.pdf
+
+report/

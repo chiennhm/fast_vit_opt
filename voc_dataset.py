@@ -192,6 +192,7 @@ class VOCDetectionDataset(Dataset):
             difficults = np.array(difficults, dtype=bool)
 
             # Clip bbox to image size initially
+            orig_w, orig_h = image.size
             boxes[:, 0] = np.clip(boxes[:, 0], 0, orig_w)
             boxes[:, 1] = np.clip(boxes[:, 1], 0, orig_h)
             boxes[:, 2] = np.clip(boxes[:, 2], 0, orig_w)
