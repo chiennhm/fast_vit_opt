@@ -47,7 +47,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.arch == "maskrcnn":
         model = FastViTMaskRCNN(
-            num_classes=num_classes,
+            num_classes=num_classes + 1,
         )
     else:
         model = FastViTDetector(
