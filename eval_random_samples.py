@@ -78,7 +78,10 @@ def main():
     model.to(device)
     model.eval()
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    gt_dir = os.path.join(args.output_dir, "ground_truth")
+    pred_dir = os.path.join(args.output_dir, "predict")
+    os.makedirs(gt_dir, exist_ok=True)
+    os.makedirs(pred_dir, exist_ok=True)
 
     print(f"Evaluating {args.num_samples} random samples with threshold {args.score_thresh}...")
     
@@ -94,30 +97,54 @@ def main():
                 max_detections=100
             )
 
-            # Convert to CPU for visualization
+            # Convert predictions to CPU for visualization
             for pred in predictions:
                 for k, v in pred.items():
                     if isinstance(v, torch.Tensor):
                         pred[k] = v.cpu()
 
-            # Save visualization
+            # Prepare ground truth for visualization
+            gt_list = []
+            for t in targets:
+                gt_list.append({
+                    "boxes": t["boxes"].cpu(),
+                    "labels": t["labels"].cpu()
+                })
+
+            # Save prediction visualization
             save_detection_results(
                 images,
                 predictions,
-                args.output_dir,
+                pred_dir,
                 class_names=class_names,
                 score_thresh=args.score_thresh,
             )
             
-            # Rename the saved file to include the index
-            old_name = os.path.join(args.output_dir, "det_0000.jpg")
-            new_name = os.path.join(args.output_dir, f"random_sample_{i+1}.jpg")
-            if os.path.exists(old_name):
-                if os.path.exists(new_name):
-                    os.remove(new_name)
-                os.rename(old_name, new_name)
+            # Rename the saved pred file
+            old_pred_name = os.path.join(pred_dir, "det_0000.jpg")
+            new_pred_name = os.path.join(pred_dir, f"random_sample_{i+1}.jpg")
+            if os.path.exists(old_pred_name):
+                if os.path.exists(new_pred_name): os.remove(new_pred_name)
+                os.rename(old_pred_name, new_pred_name)
+
+            # Save ground truth visualization
+            save_detection_results(
+                images,
+                gt_list,
+                gt_dir,
+                class_names=class_names,
+                score_thresh=0.0,
+            )
+            
+            # Rename the saved gt file
+            old_gt_name = os.path.join(gt_dir, "det_0000.jpg")
+            new_gt_name = os.path.join(gt_dir, f"random_sample_{i+1}.jpg")
+            if os.path.exists(old_gt_name):
+                if os.path.exists(new_gt_name): os.remove(new_gt_name)
+                os.rename(old_gt_name, new_gt_name)
                 
-    print(f"Done! Visualizations saved to {args.output_dir}")
+    print(f"Done! Ground truth saved to {gt_dir}")
+    print(f"Done! Predictions saved to {pred_dir}")
 
 if __name__ == '__main__':
     main()

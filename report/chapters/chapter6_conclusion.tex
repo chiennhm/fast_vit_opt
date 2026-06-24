@@ -1,0 +1,113 @@
+% ============================================================================
+% CHƯƠNG 6: KẾT LUẬN VÀ HƯỚNG PHÁT TRIỂN
+% ============================================================================
+\chapter{Kết luận và hướng phát triển}
+\label{chap:conclusion}
+
+% ============================================================================
+\section{Kết luận}
+\label{sec:conclusion}
+
+% ----------------------------------------------------------------------------
+\subsection{Kết quả đạt được}
+\label{subsec:achievements}
+
+Báo cáo đã thực hiện phân tích toàn diện về kiến trúc \fastvit{} \cite{fastvit2023} -- một mô hình lai kết hợp CNN và Transformer sử dụng kỹ thuật Structural Reparameterization. Các kết quả chính đạt được bao gồm:
+
+\begin{enumerate}
+    \item \textbf{Nền tảng lý thuyết:} Tổng hợp và phân tích sự phát triển của các kiến trúc CNN (VGG, ResNet, RepVGG) và Vision Transformer (ViT, ConvNeXt), từ đó lý giải rõ ràng động cơ và cơ sở khoa học hình thành \fastvit{}.
+    
+    \item \textbf{Phân tích kiến trúc chi tiết:} Phân tích sâu các thành phần cốt lõi:
+    \begin{itemize}
+        \item \textbf{RepMixer:} Token mixer depthwise convolution reparameterizable, chi phí $\bigO{N \cdot k^2}$ tuyến tính -- tiết kiệm hơn $100{,}000\times$ FLOPs so với Self-Attention tại stage đầu.
+        \item \textbf{Structural Reparameterization:} Kỹ thuật hợp nhất multi-branch training thành single-branch inference qua Conv-BN Fusion và Branch Fusion.
+        \item \textbf{Thiết kế hybrid thông minh:} RepMixer cho 3 stages có feature map lớn, Attention cho stage cuối có feature map nhỏ.
+    \end{itemize}
+    
+    \item \textbf{Phân tích tính toán định lượng:} 
+    \begin{itemize}
+        \item Khẳng định hiệu quả của kiến trúc lai (hybrid) thông qua việc FastViT-SA12 chỉ sử dụng khoảng $\sim$11 triệu tham số nhưng đóng vai trò là một backbone trích xuất đặc trưng cực kỳ hiệu quả cho Object Detection.
+        \item Attention ở stage cuối chỉ chiếm một tỷ lệ nhỏ tổng FLOPs nhưng đóng góp global context quan trọng cho các downstream tasks phức tạp.
+    \end{itemize}
+    
+    \item \textbf{Đánh giá ưu nhược điểm toàn diện:} Xác định rõ ưu thế về hiệu quả Pareto, khả năng triển khai đa nền tảng, tốc độ vượt trội nhờ cấu trúc Convolution đơn giản, đồng thời chỉ ra hạn chế về phụ thuộc kích thước đầu vào cố định và khó khăn trong việc nhận diện các vật thể nhỏ (do receptive field ban đầu nhỏ).
+    
+    \item \textbf{Thực nghiệm Object Detection (Mask R-CNN):} Khẳng định khả năng trích xuất đặc trưng mạnh mẽ của \fastvit{} khi áp dụng làm backbone. Mô hình Mask R-CNN + \fastvit{}-SA12 đạt \textbf{34.38\% mAP@[0.5:0.95]} và \textbf{55.23\% mAP@0.50} trên tập MS-COCO 2017 chỉ với schedule huấn luyện tiêu chuẩn 1$\times$ (12 epochs). Hiệu năng này đặc biệt ấn tượng khi so sánh với backbone lớn hơn nhiều như ResNet-50.
+\end{enumerate}
+
+% ----------------------------------------------------------------------------
+\subsection{Đóng góp của đề tài}
+\label{subsec:contributions}
+
+\begin{enumerate}
+    \item \textbf{Tài liệu tổng hợp tiếng Việt:} Cung cấp tài liệu phân tích toàn diện bằng tiếng Việt về \fastvit{} và các kiến trúc nền tảng, phục vụ cộng đồng nghiên cứu và giảng dạy trong nước.
+    
+    \item \textbf{Phân tích tính toán chi tiết:} Cung cấp các phân tích định lượng về FLOPs, tham số, latency ở mức component (stem, stage, downsampling, head), giúp hiểu rõ ``chi phí ở đâu'' trong mô hình.
+    
+    \item \textbf{So sánh đa chiều:} So sánh hệ thống theo nhiều chiều (accuracy, params, FLOPs, latency) giữa \fastvit{} và các kiến trúc tiêu biểu từ cả hai hướng CNN và Transformer.
+    
+    \item \textbf{Codebase hoàn chỉnh:} Dự án bao gồm mã nguồn cho huấn luyện (\texttt{train.py}), đánh giá (\texttt{validate.py}), benchmark (\texttt{benchmark.py}), xuất mô hình (\texttt{export\_model.py}), và quantization (\texttt{quantize.py}).
+\end{enumerate}
+
+% ============================================================================
+\section{Hướng phát triển tương lai}
+\label{sec:future_work}
+
+% ----------------------------------------------------------------------------
+\subsection{Cải thiện hiệu năng Object Detection}
+\label{subsec:detection}
+
+Dù dự án đã triển khai thành công mô hình Mask R-CNN với backbone FastViT-SA12, vẫn còn nhiều tiềm năng để mở rộng:
+\begin{itemize}
+    \item \textbf{Kiến trúc phát hiện tiên tiến hơn:} Thử nghiệm \fastvit{} làm backbone cho các detector hiện đại như FCOS, DETR, hoặc YOLOv8 thay vì Mask R-CNN cổ điển.
+    \item \textbf{Schedule huấn luyện dài hơn:} Sử dụng lịch trình 3$\times$ (36 epochs) hoặc multi-scale training để cải thiện khả năng phát hiện vật thể nhỏ.
+    \item \textbf{Nâng cấp backbone:} Áp dụng các biến thể lớn hơn của FastViT như SA36 hoặc MA36 để đánh giá giới hạn mAP trên bộ dữ liệu COCO.
+    \item \textbf{Tích hợp Deformable Convolution:} Khắc phục điểm yếu về fixed grid receptive field của backbone để định vị tốt hơn các vật thể có hình dáng phức tạp.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Mở rộng sang Segmentation}
+\label{subsec:segmentation}
+
+\fastvit{} đã tích hợp sẵn hỗ trợ cho mmsegmentation:
+\begin{itemize}
+    \item Backbone đăng ký trong \texttt{BACKBONES} registry của mmseg.
+    \item Có thể kết hợp với các decoder: FPN, UperNet, DeepLabV3+.
+    \item Hướng phát triển: đánh giá trên ADE20K và Cityscapes, so sánh mIoU với Swin Transformer.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Triển khai trên thiết bị Edge AI}
+\label{subsec:edge_deployment}
+
+\begin{itemize}
+    \item \textbf{Quantization INT8:} Dự án đã bao gồm \texttt{quantize.py} sử dụng PyTorch FX Graph Mode Quantization. Cần đánh giá accuracy drop sau quantization.
+    \item \textbf{CoreML:} Đã hỗ trợ export CoreML package cho iOS deployment.
+    \item \textbf{TensorRT:} Có thể export ONNX rồi convert sang TensorRT cho NVIDIA Jetson.
+    \item \textbf{TFLite:} Cần thêm pipeline export TFLite cho Android deployment.
+    \item \textbf{Hướng phát triển:} Benchmark latency/accuracy trade-off trên Raspberry Pi, NVIDIA Jetson Nano, Google Coral.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Nghiên cứu các biến thể FastViT mới}
+\label{subsec:new_variants}
+
+\begin{itemize}
+    \item \textbf{Hybrid attention strategies:} Thử nghiệm sử dụng attention ở stage 2 và 3 thay vì chỉ stage 3. Đánh giá trade-off accuracy/latency.
+    
+    \item \textbf{Large kernel alternatives:} Thay RepMixer kernel $3 \times 3$ bằng kernel lớn hơn ($5 \times 5$, $7 \times 7$) để tăng receptive field mà không cần attention. Kế thừa từ RepLKNet \cite{replknet2022}.
+    
+    \item \textbf{Dynamic token mixing:} Kết hợp RepMixer với conditional/dynamic routing để chọn strategy mixing phù hợp với từng input.
+    
+    \item \textbf{Multi-scale training:} Huấn luyện với multi-scale input ($192 \to 256 \to 320$) để tăng robustness.
+    
+    \item \textbf{Self-supervised pre-training:} Áp dụng các phương pháp self-supervised (MAE, DINO) cho \fastvit{} backbone, giảm phụ thuộc vào labeled data.
+    
+    \item \textbf{Knowledge distillation nâng cao:} Thử nghiệm feature-level distillation thay vì logit-level, hoặc self-distillation giữa multi-branch và single-branch.
+\end{itemize}
+
+\vspace{1cm}
+
+\noindent\rule{\textwidth}{0.4pt}
+
+\textbf{Tóm lại}, \fastvit{} đại diện cho một bước tiến quan trọng trong việc giải quyết bài toán đánh đổi giữa độ chính xác và tốc độ suy luận trong thị giác máy tính. Bằng cách kết hợp sáng tạo Structural Reparameterization, RepMixer, và thiết kế hybrid CNN-Transformer, \fastvit{} mở ra khả năng triển khai các mô hình thị giác hiện đại trên thiết bị di động và Edge AI với hiệu suất thực tế vượt trội.

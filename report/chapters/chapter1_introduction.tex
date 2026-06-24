@@ -1,0 +1,86 @@
+% ============================================================================
+% CHƯƠNG 1: GIỚI THIỆU
+% ============================================================================
+\chapter{Giới thiệu}
+\label{chap:introduction}
+
+\section{Lý do chọn đề tài}
+\label{sec:lydo}
+
+Trong những năm gần đây, thị giác máy tính (Computer Vision) đã có những bước tiến vượt bậc nhờ sự phát triển của các mô hình học sâu (Deep Learning). Từ các mạng tích chập (CNN) truyền thống như VGG \cite{vgg2015} và ResNet \cite{resnet2016} cho đến các mô hình Vision Transformer (ViT) \cite{vit2021}, các kiến trúc mới liên tục được đề xuất nhằm cải thiện độ chính xác trong các bài toán nhận dạng hình ảnh.
+
+Tuy nhiên, một thách thức lớn đặt ra là sự đánh đổi giữa \textbf{độ chính xác} và \textbf{hiệu quả tính toán}. Các mô hình Vision Transformer đạt được kết quả ấn tượng trên ImageNet \cite{imagenet2009} nhưng thường yêu cầu lượng tính toán rất lớn do cơ chế Self-Attention có độ phức tạp bậc hai $\bigO{N^2}$ theo số lượng token. Điều này khiến việc triển khai trên các thiết bị biên (Edge Devices) như điện thoại di động, thiết bị IoT, hay các hệ thống nhúng trở nên khó khăn.
+
+\fastvit{} \cite{fastvit2023}, được đề xuất bởi đội ngũ nghiên cứu Apple tại hội nghị ICCV 2023, là một giải pháp đột phá nhằm giải quyết bài toán này. Bằng cách kết hợp ưu điểm của cả CNN và Transformer thông qua kỹ thuật \textbf{Structural Reparameterization} (Tái tham số hóa cấu trúc), \fastvit{} đạt được sự cân bằng xuất sắc giữa tốc độ và độ chính xác, mở ra khả năng triển khai thực tế trên các nền tảng phần cứng có tài nguyên hạn chế.
+
+Chính vì tính thời sự, tính ứng dụng cao và sự đổi mới trong thiết kế kiến trúc, nhóm nghiên cứu đã chọn đề tài \textit{``Phân tích và đánh giá kiến trúc FastViT -- A Fast Hybrid Vision Transformer using Structural Reparameterization''} làm chủ đề báo cáo.
+
+\section{Mục tiêu nghiên cứu}
+\label{sec:muctieu}
+
+Đề tài hướng đến các mục tiêu cụ thể sau:
+
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{Tìm hiểu nền tảng lý thuyết:} Nghiên cứu tổng quan về sự phát triển của các kiến trúc CNN và Vision Transformer, từ đó hiểu rõ động cơ hình thành \fastvit{}.
+    
+    \item \textbf{Phân tích kiến trúc:} Phân tích chi tiết kiến trúc \fastvit{}, bao gồm các thành phần cốt lõi như RepMixer, Structural Reparameterization, Attention Block và các cơ chế giảm chi phí tính toán.
+    
+    \item \textbf{Phân tích tính toán:} Đánh giá chi tiết chi phí tính toán (FLOPs), số lượng tham số, độ trễ suy luận (latency) và thông lượng (throughput) của \fastvit{} so với các mô hình tiêu biểu khác.
+    
+    \item \textbf{Thực nghiệm và đánh giá:} Tiến hành huấn luyện và đánh giá \fastvit{}-SA12 trên tập dữ liệu MS-COCO 2017 cho tác vụ phát hiện đối tượng, so sánh với các backbone tiêu chuẩn (ví dụ: ResNet-50).
+    
+    \item \textbf{Đánh giá ưu nhược điểm:} Phân tích toàn diện các ưu điểm và hạn chế của \fastvit{}, đề xuất hướng phát triển trong tương lai.
+\end{enumerate}
+
+\section{Nội dung nghiên cứu}
+\label{sec:noidung}
+
+Báo cáo tập trung vào các nội dung chính sau:
+
+\begin{itemize}
+    \item Tổng hợp và phân tích lý thuyết về các kiến trúc nền tảng: Dense Convolution, Depthwise Separable Convolution, VGG, ResNet, RepVGG, Transformer, Vision Transformer, ConvNeXt.
+    
+    \item Phân tích chi tiết kiến trúc \fastvit{} bao gồm: Convolutional Stem, RepMixer Block, Attention Block, PatchEmbed/Downsampling, và Classification Head.
+    
+    \item Phân tích cơ chế Structural Reparameterization -- kỹ thuật then chốt cho phép \fastvit{} đạt hiệu quả suy luận vượt trội.
+    
+    \item So sánh định lượng chi phí tính toán giữa RepMixer và Self-Attention.
+    
+    \item Thiết lập môi trường thực nghiệm, huấn luyện và đánh giá các mô hình trên cùng tập dữ liệu và cấu hình.
+    
+    \item Phân tích kết quả thực nghiệm, thảo luận ưu nhược điểm và đề xuất hướng phát triển.
+\end{itemize}
+
+\section{Phạm vi nghiên cứu}
+\label{sec:phamvi}
+
+\begin{itemize}
+    \item \textbf{Bài toán:} Phát hiện đối tượng (Object Detection) trên tập dữ liệu MS-COCO 2017.
+    
+    \item \textbf{Các mô hình:} Mask R-CNN sử dụng backbone \textbf{FastViT-SA12} và \textbf{ResNet-50}.
+    
+    \item \textbf{Chỉ số đánh giá:} mAP@[0.5:0.95], mAP@0.50, và Average Precision (AP) cho từng lớp đối tượng cụ thể.
+    
+    \item \textbf{Kích thước đầu vào:} Ảnh được resize cạnh ngắn về 800 pixels.
+    
+    \item \textbf{Phần cứng benchmark:} GPU NVIDIA và iPhone 12 Pro (theo kết quả gốc từ Apple).
+\end{itemize}
+
+\section{Bố cục báo cáo}
+\label{sec:bocuc}
+
+Báo cáo được tổ chức thành 6 chương với nội dung như sau:
+
+\begin{description}
+    \item[Chương 1 -- Giới thiệu:] Trình bày lý do chọn đề tài, mục tiêu, nội dung, phạm vi nghiên cứu và bố cục báo cáo.
+    
+    \item[Chương 2 -- Cơ sở lý thuyết và các nghiên cứu liên quan:] Trình bày nền tảng lý thuyết về CNN, Transformer và Vision Transformer, phân tích các kiến trúc tiêu biểu (VGG, ResNet, RepVGG, ViT, ConvNeXt), so sánh CNN và Vision Transformer, và phân tích động cơ hình thành FastViT.
+    
+    \item[Chương 3 -- Kiến trúc FastViT:] Phân tích chi tiết kiến trúc tổng thể của FastViT, các thành phần cốt lõi (RepMixer, Attention Block, Structural Reparameterization), và so sánh các phiên bản.
+    
+    \item[Chương 4 -- Thiết lập thực nghiệm:] Mô tả môi trường thực nghiệm, tập dữ liệu, tiền xử lý, cấu hình huấn luyện, các mô hình so sánh và các chỉ số đánh giá.
+    
+    \item[Chương 5 -- Kết quả thực nghiệm và đánh giá:] Trình bày kết quả huấn luyện, so sánh theo nhiều chiều (độ chính xác, tham số, FLOPs, tốc độ), phân tích ưu nhược điểm và thảo luận.
+    
+    \item[Chương 6 -- Kết luận và hướng phát triển:] Tổng kết các kết quả đạt được, đóng góp của đề tài, và đề xuất các hướng nghiên cứu tiếp theo.
+\end{description}

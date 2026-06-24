@@ -1,0 +1,515 @@
+% ============================================================================
+% CHƯƠNG 2: CƠ SỞ LÝ THUYẾT VÀ CÁC NGHIÊN CỨU LIÊN QUAN
+% ============================================================================
+\chapter{Cơ sở lý thuyết và các nghiên cứu liên quan}
+\label{chap:background}
+
+Chương này trình bày nền tảng lý thuyết về sự phát triển của các kiến trúc mạng nơ-ron trong thị giác máy tính, từ CNN truyền thống đến Vision Transformer, phân tích ưu nhược điểm của từng hướng tiếp cận, và lý giải động cơ hình thành \fastvit{}.
+
+% ============================================================================
+\section{Sự phát triển của mạng nơ-ron tích chập (CNN)}
+\label{sec:cnn_evolution}
+
+% ----------------------------------------------------------------------------
+\subsection{Dense Convolution}
+\label{subsec:dense_conv}
+
+\subsubsection*{Nguyên lý hoạt động}
+
+Dense Convolution (hay Standard Convolution) là phép tích chập tiêu chuẩn, trong đó mỗi bộ lọc (filter/kernel) thực hiện phép nhân tích chập trên \textit{toàn bộ} các kênh đầu vào. Cho đầu vào có kích thước $C_{in} \times H \times W$ và bộ lọc có kích thước $C_{in} \times k \times k$, đầu ra tại vị trí $(i, j)$ của kênh thứ $m$ được tính:
+
+\begin{equation}
+    y_m(i, j) = \sum_{c=0}^{C_{in}-1} \sum_{p=0}^{k-1} \sum_{q=0}^{k-1} w_m(c, p, q) \cdot x(c, i+p, j+q) + b_m
+    \label{eq:dense_conv}
+\end{equation}
+
+\noindent trong đó $w_m$ là trọng số của bộ lọc thứ $m$, $b_m$ là bias, $k$ là kích thước kernel.
+
+\textbf{Chi phí tính toán:} Số phép nhân--cộng (MACs) cho một lớp Dense Convolution:
+\begin{equation}
+    \text{FLOPs}_{\text{dense}} = C_{in} \times k^2 \times C_{out} \times H_{out} \times W_{out}
+    \label{eq:flops_dense}
+\end{equation}
+
+\subsubsection*{Ưu điểm}
+\begin{itemize}
+    \item Khả năng trích xuất đặc trưng mạnh mẽ nhờ mỗi bộ lọc xem xét mối quan hệ giữa \textit{tất cả} các kênh đầu vào.
+    \item Tính bất biến tịnh tiến (translation invariance) và chia sẻ tham số (weight sharing) giúp mô hình hiệu quả hơn so với các lớp fully-connected.
+\end{itemize}
+
+\subsubsection*{Hạn chế}
+\begin{itemize}
+    \item Chi phí tính toán tỷ lệ thuận với $C_{in} \times C_{out}$, tăng nhanh khi mạng sâu hơn.
+    \item Số lượng tham số lớn: $C_{in} \times k^2 \times C_{out}$ cho mỗi lớp.
+    \item Khó triển khai trên thiết bị có tài nguyên hạn chế.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Depthwise Separable Convolution}
+\label{subsec:depthwise}
+
+\subsubsection*{Kiến trúc}
+
+Depthwise Separable Convolution \cite{depthwise2017} phân rã phép tích chập tiêu chuẩn thành hai bước:
+
+\begin{enumerate}
+    \item \textbf{Depthwise Convolution (DW):} Áp dụng một bộ lọc $k \times k$ \textit{riêng biệt} cho mỗi kênh đầu vào (groups $= C_{in}$):
+    \begin{equation}
+        y_c^{DW}(i, j) = \sum_{p=0}^{k-1} \sum_{q=0}^{k-1} w_c(p, q) \cdot x(c, i+p, j+q)
+    \end{equation}
+    
+    \item \textbf{Pointwise Convolution (PW):} Sử dụng tích chập $1 \times 1$ để kết hợp thông tin giữa các kênh:
+    \begin{equation}
+        y_m^{PW}(i, j) = \sum_{c=0}^{C_{in}-1} w_m(c) \cdot y_c^{DW}(i, j) + b_m
+    \end{equation}
+\end{enumerate}
+
+\subsubsection*{So sánh với Dense Convolution}
+
+Chi phí tính toán của Depthwise Separable Convolution:
+\begin{equation}
+    \text{FLOPs}_{\text{DW+PW}} = \underbrace{C_{in} \times k^2 \times H_{out} \times W_{out}}_{\text{Depthwise}} + \underbrace{C_{in} \times C_{out} \times H_{out} \times W_{out}}_{\text{Pointwise}}
+\end{equation}
+
+Tỷ lệ giảm chi phí so với Dense Convolution:
+\begin{equation}
+    \frac{\text{FLOPs}_{\text{DW+PW}}}{\text{FLOPs}_{\text{dense}}} = \frac{1}{C_{out}} + \frac{1}{k^2}
+\end{equation}
+
+Với $k = 3$ và $C_{out} = 256$, tỷ lệ này xấp xỉ $\frac{1}{256} + \frac{1}{9} \approx 0.115$, tức giảm khoảng \textbf{8.7 lần} chi phí tính toán. Đây là nền tảng quan trọng được \fastvit{} sử dụng trong RepMixer Block.
+
+\subsubsection*{Ưu điểm và hạn chế}
+\begin{itemize}
+    \item \textbf{Ưu điểm:} Giảm đáng kể chi phí tính toán và số tham số mà vẫn duy trì khả năng biểu diễn tốt.
+    \item \textbf{Hạn chế:} Depthwise convolution có mật độ tính toán thấp (low arithmetic intensity), dẫn đến hiệu suất phần cứng thấp hơn dense convolution trên GPU.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Kiến trúc VGG}
+\label{subsec:vgg}
+
+\subsubsection*{Ý tưởng thiết kế}
+
+VGGNet \cite{vgg2015} (Visual Geometry Group, Oxford, 2014) đề xuất ý tưởng sử dụng các lớp tích chập nhỏ ($3 \times 3$) xếp chồng thay vì các bộ lọc lớn. Hai lớp $3 \times 3$ liên tiếp tạo ra vùng tiếp nhận (receptive field) tương đương một lớp $5 \times 5$, và ba lớp $3 \times 3$ tương đương một lớp $7 \times 7$, nhưng với số tham số ít hơn.
+
+\subsubsection*{Cấu trúc mạng}
+
+VGG-16 gồm 13 lớp tích chập $3 \times 3$ và 3 lớp fully-connected, tổ chức thành 5 khối (block). Mỗi khối kết thúc bằng max-pooling $2 \times 2$ để giảm kích thước không gian. Số kênh tăng dần: $64 \to 128 \to 256 \to 512 \to 512$.
+
+\subsubsection*{Ưu điểm}
+\begin{itemize}
+    \item Kiến trúc đơn giản, đồng nhất, dễ hiểu và dễ triển khai.
+    \item Chứng minh rằng chiều sâu của mạng (depth) là yếu tố quan trọng cho hiệu suất.
+    \item Tạo nền tảng cho nhiều kiến trúc sau này, đặc biệt là \repvgg{}.
+\end{itemize}
+
+\subsubsection*{Hạn chế}
+\begin{itemize}
+    \item Số lượng tham số rất lớn ($\sim$138M cho VGG-16), chủ yếu do các lớp fully-connected.
+    \item Gặp vấn đề gradient vanishing khi mạng quá sâu.
+    \item Không có cơ chế skip connection, hạn chế khả năng huấn luyện mạng rất sâu.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Kiến trúc ResNet}
+\label{subsec:resnet}
+
+\subsubsection*{Residual Learning}
+
+ResNet \cite{resnet2016} (Microsoft Research, 2015) giới thiệu khái niệm \textbf{Residual Learning}, trong đó mạng học hàm dư (residual function) thay vì ánh xạ trực tiếp:
+
+\begin{equation}
+    \mathcal{F}(x) = \mathcal{H}(x) - x \quad \Rightarrow \quad \mathcal{H}(x) = \mathcal{F}(x) + x
+    \label{eq:residual}
+\end{equation}
+
+\noindent trong đó $\mathcal{H}(x)$ là ánh xạ mong muốn, $\mathcal{F}(x)$ là hàm dư cần học, và $x$ là đầu vào (identity).
+
+\subsubsection*{Skip Connection}
+
+Skip connection (hay shortcut connection) cho phép gradient lan truyền trực tiếp qua nhiều lớp mà không bị suy giảm. Cụ thể, trong quá trình lan truyền ngược:
+
+\begin{equation}
+    \frac{\partial \mathcal{L}}{\partial x} = \frac{\partial \mathcal{L}}{\partial \mathcal{H}} \cdot \left(1 + \frac{\partial \mathcal{F}}{\partial x}\right)
+\end{equation}
+
+Thành phần ``$1$'' đảm bảo gradient luôn có đường đi trực tiếp, giải quyết vấn đề gradient vanishing.
+
+\subsubsection*{Ưu điểm}
+\begin{itemize}
+    \item Cho phép huấn luyện mạng rất sâu (lên đến 152 lớp và hơn).
+    \item Skip connection cải thiện đáng kể sự hội tụ trong huấn luyện.
+    \item Đạt kết quả state-of-the-art trên ImageNet tại thời điểm công bố.
+    \item Ý tưởng skip connection được kế thừa rộng rãi trong các kiến trúc sau, bao gồm cả \fastvit{}.
+\end{itemize}
+
+\subsubsection*{Hạn chế}
+\begin{itemize}
+    \item Kiến trúc multi-branch (nhánh identity + nhánh residual) tạo thêm chi phí bộ nhớ khi suy luận.
+    \item Các phiên bản lớn (ResNet-101, ResNet-152) vẫn có chi phí tính toán đáng kể.
+    \item Vùng tiếp nhận bị giới hạn bởi kích thước kernel cục bộ.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Kiến trúc RepVGG}
+\label{subsec:repvgg}
+
+\subsubsection*{Structural Reparameterization}
+
+\repvgg{} \cite{repvgg2021} (Ding et al., 2021) giới thiệu kỹ thuật \textbf{Structural Reparameterization} -- ý tưởng cốt lõi mà \fastvit{} kế thừa và phát triển. Ý tưởng chính: sử dụng kiến trúc multi-branch trong quá trình huấn luyện để tăng khả năng biểu diễn, sau đó \textit{rút gọn toán học} thành kiến trúc single-branch đơn giản cho suy luận.
+
+\subsubsection*{Training-time Multi-Branch}
+
+Trong quá trình huấn luyện, mỗi block của \repvgg{} gồm ba nhánh song song:
+
+\begin{equation}
+    y = \text{BN}_1(\text{Conv}_{3\times3}(x)) + \text{BN}_2(\text{Conv}_{1\times1}(x)) + \text{BN}_3(x)
+    \label{eq:repvgg_train}
+\end{equation}
+
+Ba nhánh này cung cấp ba cấp độ trích xuất đặc trưng: cục bộ ($3 \times 3$), kênh ($1 \times 1$) và đồng nhất (identity).
+
+\subsubsection*{Inference-time Single-Branch}
+
+Khi suy luận, các nhánh được hợp nhất thành một lớp tích chập $3 \times 3$ duy nhất. Quá trình hợp nhất dựa trên hai bước:
+
+\textbf{Bước 1 -- Conv-BN Fusion:} Hấp thụ BatchNorm vào trọng số Conv:
+\begin{equation}
+    W_{\text{fused}} = W \cdot \frac{\gamma}{\sqrt{\sigma^2 + \epsilon}}, \quad b_{\text{fused}} = (b - \mu) \cdot \frac{\gamma}{\sqrt{\sigma^2 + \epsilon}} + \beta
+    \label{eq:conv_bn_fusion}
+\end{equation}
+
+\textbf{Bước 2 -- Branch Fusion:} Cộng trọng số các nhánh (sau khi pad về cùng kích thước):
+\begin{equation}
+    W_{\text{merged}} = W_{3\times3} + \text{pad}(W_{1\times1}) + \text{pad}(W_{\text{identity}})
+    \label{eq:branch_fusion}
+\end{equation}
+
+\subsubsection*{Vai trò đối với FastViT}
+
+\fastvit{} áp dụng và mở rộng ý tưởng Structural Reparameterization của \repvgg{} vào nhiều thành phần:
+\begin{itemize}
+    \item \textbf{MobileOne Block:} Sử dụng multi-branch overparameterization tương tự \repvgg{}.
+    \item \textbf{RepMixer:} Kết hợp token mixing với reparameterization để thay thế Self-Attention.
+    \item \textbf{RepCPE:} Conditional Positional Encoding có thể reparameterize.
+    \item \textbf{ReparamLargeKernelConv:} Tích chập nhân lớn (7$\times$7) reparameterizable cho downsampling.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Tổng kết hướng phát triển CNN}
+\label{subsec:cnn_summary}
+
+Bảng~\ref{tab:cnn_evolution} tóm tắt sự phát triển của các kiến trúc CNN chính:
+
+\begin{table}[H]
+\centering
+\caption{Tổng kết các mốc phát triển của CNN.}
+\label{tab:cnn_evolution}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Kiến trúc} & \textbf{Năm} & \textbf{Đóng góp chính} \\
+\midrule
+VGG & 2014 & Chứng minh vai trò của chiều sâu mạng; kernel $3 \times 3$ đồng nhất \\
+ResNet & 2015 & Skip Connection, Residual Learning, huấn luyện mạng rất sâu \\
+MobileNet & 2017 & Depthwise Separable Convolution, tối ưu cho thiết bị di động \\
+RepVGG & 2021 & Structural Reparameterization: multi-branch khi train, single-branch khi suy luận \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Xu hướng chung: từ \textit{tăng chiều sâu} (VGG) $\to$ \textit{giải quyết gradient} (ResNet) $\to$ \textit{tối ưu tính toán} (MobileNet) $\to$ \textit{tái tham số hóa} (RepVGG). \fastvit{} kế thừa tất cả các bài học này.
+
+% ============================================================================
+\section{Sự phát triển của Transformer trong thị giác máy tính}
+\label{sec:transformer_evolution}
+
+% ----------------------------------------------------------------------------
+\subsection{Transformer nguyên bản}
+\label{subsec:transformer_original}
+
+\subsubsection*{Encoder--Decoder}
+
+Kiến trúc Transformer \cite{transformer2017} (Vaswani et al., 2017) ban đầu được thiết kế cho xử lý ngôn ngữ tự nhiên, gồm hai phần:
+
+\begin{itemize}
+    \item \textbf{Encoder:} Biến đổi chuỗi đầu vào thành biểu diễn ẩn (hidden representation) thông qua các lớp Multi-Head Attention và Feed-Forward Network.
+    \item \textbf{Decoder:} Sinh chuỗi đầu ra dựa trên biểu diễn ẩn và chuỗi đã sinh trước đó.
+\end{itemize}
+
+\subsubsection*{Multi-Head Attention}
+
+Thay vì sử dụng một phép attention duy nhất, Transformer sử dụng $h$ ``head'' song song, mỗi head tập trung vào một không gian con (subspace) khác nhau:
+
+\begin{equation}
+    \text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, \ldots, \text{head}_h) \cdot W^O
+\end{equation}
+\begin{equation}
+    \text{head}_i = \text{Attention}(Q W_i^Q, K W_i^K, V W_i^V)
+\end{equation}
+
+\noindent trong đó $W_i^Q, W_i^K, W_i^V \in \mathbb{R}^{d_{\text{model}} \times d_k}$ là các ma trận chiếu cho head thứ $i$.
+
+% ----------------------------------------------------------------------------
+\subsection{Attention Mechanism}
+\label{subsec:attention}
+
+Cơ chế Attention hoạt động dựa trên ba thành phần:
+
+\begin{description}
+    \item[Query ($Q$):] Biểu diễn ``câu hỏi'' -- token hiện tại đang tìm kiếm thông tin.
+    \item[Key ($K$):] Biểu diễn ``khóa'' -- mỗi token cung cấp một khóa để so khớp.
+    \item[Value ($V$):] Biểu diễn ``giá trị'' -- thông tin thực tế được trả về khi khóa khớp.
+\end{description}
+
+Điểm tương đồng giữa Query và Key quyết định trọng số của Value trong đầu ra.
+
+% ----------------------------------------------------------------------------
+\subsection{Self-Attention}
+\label{subsec:self_attention}
+
+\subsubsection*{Cơ chế hoạt động}
+
+Trong Self-Attention, các ma trận $Q$, $K$, $V$ đều được tạo ra từ cùng đầu vào $X$:
+
+\begin{equation}
+    Q = XW^Q, \quad K = XW^K, \quad V = XW^V
+\end{equation}
+
+Phép attention được tính:
+\begin{equation}
+    \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right) V
+    \label{eq:self_attention}
+\end{equation}
+
+\noindent trong đó $d_k$ là chiều của Key, $\sqrt{d_k}$ là hệ số co giãn (scaling factor) ngăn giá trị dot product quá lớn.
+
+\subsubsection*{Ưu điểm}
+\begin{itemize}
+    \item Thu nhận mối quan hệ toàn cục giữa mọi cặp token trong chuỗi.
+    \item Không bị ràng buộc bởi khoảng cách vị trí (position-agnostic).
+    \item Có khả năng song song hóa cao.
+\end{itemize}
+
+\subsubsection*{Hạn chế}
+\begin{itemize}
+    \item \textbf{Độ phức tạp bậc hai:} Chi phí tính toán là $\bigO{N^2 \cdot d}$ với $N$ là số token, $d$ là chiều embedding.
+    \item \textbf{Chi phí bộ nhớ:} Ma trận attention $N \times N$ đòi hỏi bộ nhớ lớn.
+    \item Với ảnh $256 \times 256$, nếu patch size là 16, ta có $N = 256$ token. Nhưng nếu xử lý ở mức pixel, $N = 65{,}536$, chi phí sẽ cực kỳ lớn.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Vision Transformer (ViT)}
+\label{subsec:vit}
+
+\subsubsection*{Patch Embedding}
+
+Vision Transformer \cite{vit2021} (Dosovitskiy et al., 2021) chia ảnh $H \times W$ thành $N = \frac{HW}{P^2}$ patch có kích thước $P \times P$, sau đó chiếu mỗi patch thành vector embedding $d$-chiều:
+
+\begin{equation}
+    \mathbf{z}_i = \text{flatten}(\text{patch}_i) \cdot W_E + \mathbf{e}_{\text{pos}}^i, \quad i = 1, \ldots, N
+\end{equation}
+
+\noindent trong đó $W_E \in \mathbb{R}^{(P^2 \cdot 3) \times d}$ là ma trận embedding, $\mathbf{e}_{\text{pos}}^i$ là positional embedding.
+
+\subsubsection*{Transformer Encoder}
+
+Các patch embedding được đưa qua $L$ lớp Transformer Encoder, mỗi lớp gồm:
+\begin{align}
+    \mathbf{z}'_\ell &= \text{MSA}(\text{LN}(\mathbf{z}_{\ell-1})) + \mathbf{z}_{\ell-1} \\
+    \mathbf{z}_\ell &= \text{FFN}(\text{LN}(\mathbf{z}'_\ell)) + \mathbf{z}'_\ell
+\end{align}
+
+\noindent trong đó MSA là Multi-Head Self-Attention, LN là Layer Normalization, FFN là Feed-Forward Network.
+
+\subsubsection*{Classification Head}
+
+Token \texttt{[CLS]} được thêm vào đầu chuỗi và sử dụng biểu diễn cuối cùng của nó cho phân loại:
+\begin{equation}
+    \hat{y} = \text{Linear}(\text{LN}(\mathbf{z}_L^0))
+\end{equation}
+
+\subsubsection*{Ưu điểm}
+\begin{itemize}
+    \item Khả năng thu nhận ngữ cảnh toàn cục từ lớp đầu tiên.
+    \item Hiệu quả đặc biệt khi có lượng dữ liệu huấn luyện lớn (JFT-300M).
+    \item Kiến trúc linh hoạt, dễ mở rộng.
+\end{itemize}
+
+\subsubsection*{Hạn chế}
+\begin{itemize}
+    \item Yêu cầu lượng dữ liệu lớn để huấn luyện hiệu quả; trên ImageNet-1K đơn thuần, ViT kém CNN.
+    \item Thiếu inductive bias cục bộ (locality) và bất biến tịnh tiến.
+    \item Chi phí tính toán Self-Attention $\bigO{N^2 d}$ hạn chế xử lý ảnh phân giải cao.
+    \item Độ trễ suy luận cao trên thiết bị di động.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{ConvNeXt}
+\label{subsec:convnext}
+
+\subsubsection*{Động cơ phát triển}
+
+ConvNeXt \cite{convnext2022} (Liu et al., Meta/Facebook AI, 2022) đặt câu hỏi: \textit{``Liệu CNN thuần túy có thể đạt hiệu suất ngang ViT nếu áp dụng các kỹ thuật thiết kế hiện đại?''}. Bằng cách ``hiện đại hóa'' ResNet từng bước một, ConvNeXt chứng minh câu trả lời là \textbf{có}.
+
+\subsubsection*{Các cải tiến từ ViT}
+
+ConvNeXt áp dụng nhiều nguyên tắc thiết kế từ ViT vào CNN:
+\begin{enumerate}
+    \item \textbf{Tỷ lệ stage:} Thay đổi từ (3,4,6,3) của ResNet sang (3,3,9,3) giống Swin Transformer.
+    \item \textbf{Patchify stem:} Sử dụng Conv $4 \times 4$, stride 4 thay vì stem 3-lớp.
+    \item \textbf{Depthwise convolution:} Tách phần spatial và channel mixing giống Transformer.
+    \item \textbf{Inverted bottleneck:} Mở rộng chiều ẩn lên $4\times$ giống FFN trong Transformer.
+    \item \textbf{Kernel lớn ($7 \times 7$):} Mở rộng receptive field tương tự attention.
+    \item \textbf{Layer Normalization thay Batch Normalization.}
+    \item \textbf{GELU thay ReLU.}
+\end{enumerate}
+
+\subsubsection*{Ưu điểm}
+\begin{itemize}
+    \item Đạt hiệu suất ngang hoặc vượt Swin Transformer trên ImageNet.
+    \item Giữ nguyên tính đơn giản và hiệu quả của CNN thuần túy.
+    \item Khả năng triển khai tốt hơn ViT trên nhiều nền tảng phần cứng.
+\end{itemize}
+
+\subsubsection*{Hạn chế}
+\begin{itemize}
+    \item Depthwise convolution $7 \times 7$ vẫn có hiệu suất phần cứng thấp hơn conv $3 \times 3$.
+    \item Thiếu cơ chế thu nhận ngữ cảnh toàn cục rõ ràng (không có attention).
+    \item Không có cơ chế reparameterization để tối ưu cho suy luận.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Tổng kết hướng phát triển Transformer}
+\label{subsec:transformer_summary}
+
+\begin{table}[H]
+\centering
+\caption{So sánh các kiến trúc Transformer-based trong thị giác máy tính.}
+\label{tab:transformer_evolution}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Kiến trúc} & \textbf{Năm} & \textbf{Đóng góp chính} \\
+\midrule
+Transformer & 2017 & Attention mechanism, song song hóa, bỏ recurrence \\
+ViT & 2021 & Áp dụng Transformer cho ảnh qua patch embedding \\
+Swin Transformer & 2021 & Window-based attention, hierarchical, giảm $\bigO{N^2}$ \\
+ConvNeXt & 2022 & Modernize CNN đạt ngang ViT, không cần attention \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================================
+\section{So sánh CNN và Vision Transformer}
+\label{sec:cnn_vs_vit}
+
+% ----------------------------------------------------------------------------
+\subsection{Khả năng trích xuất đặc trưng}
+
+\begin{itemize}
+    \item \textbf{CNN:} Trích xuất đặc trưng \textit{cục bộ} (local features) hiệu quả nhờ tính chất locality của phép tích chập. Các đặc trưng toàn cục chỉ đạt được ở các lớp sâu (receptive field tích lũy).
+    
+    \item \textbf{Vision Transformer:} Có khả năng thu nhận \textit{ngữ cảnh toàn cục} ngay từ lớp đầu tiên nhờ Self-Attention. Tuy nhiên, thiếu inductive bias cục bộ, cần nhiều dữ liệu hơn để học.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Chi phí tính toán}
+
+\begin{table}[H]
+\centering
+\caption{So sánh độ phức tạp tính toán.}
+\label{tab:compute_compare}
+\begin{tabular}{l c c}
+\toprule
+\textbf{Thành phần} & \textbf{CNN (Conv $k \times k$)} & \textbf{ViT (Self-Attention)} \\
+\midrule
+FLOPs & $\bigO{C^2 k^2 HW}$ & $\bigO{N^2 d + N d^2}$ \\
+Bộ nhớ & $\bigO{C^2 k^2}$ params & $\bigO{N^2 + d^2}$ \\
+Tỷ lệ với ảnh & Tuyến tính ($HW$) & Bậc hai ($N^2 = H^2W^2/P^4$) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Với ảnh $256 \times 256$ và patch size $P = 16$: $N = 256$ token, Self-Attention cần $256^2 = 65{,}536$ phép nhân attention -- có thể chấp nhận được. Nhưng với patch size nhỏ hơn hoặc ảnh lớn hơn, chi phí tăng nhanh chóng.
+
+% ----------------------------------------------------------------------------
+\subsection{Hiệu quả phần cứng}
+
+\begin{itemize}
+    \item \textbf{CNN:} Phép tích chập $3 \times 3$ được tối ưu cao trên GPU (cuDNN, TensorCore), FPGA và ASIC. Mật độ tính toán (arithmetic intensity) cao.
+    
+    \item \textbf{Vision Transformer:} Attention chứa nhiều phép toán memory-bound (softmax, reshape, transpose), hiệu suất phần cứng thấp hơn. Các phép chiếu $Q$, $K$, $V$ là matrix multiplication -- hiệu quả trên GPU, nhưng tổng thể vẫn chậm hơn pure conv trên thiết bị di động.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Khả năng triển khai trên Edge AI}
+
+\begin{itemize}
+    \item \textbf{CNN:} Dễ triển khai nhờ hỗ trợ tốt từ các framework (CoreML, TensorRT, ONNX Runtime). Quantization xuống INT8 hiệu quả.
+    
+    \item \textbf{ViT:} Khó triển khai do softmax, dynamic attention maps, thiếu hỗ trợ tối ưu trên nhiều backend mobile.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Những thách thức còn tồn tại}
+
+\begin{enumerate}
+    \item Làm thế nào kết hợp \textit{locality} của CNN và \textit{global context} của Transformer mà không đánh đổi tốc độ?
+    \item Làm thế nào thiết kế token mixer hiệu quả hơn Self-Attention cho các stage đầu?
+    \item Làm thế nào tận dụng overparameterization trong huấn luyện nhưng giữ mô hình gọn nhẹ khi suy luận?
+\end{enumerate}
+
+Đây chính là những câu hỏi mà \fastvit{} đưa ra lời giải.
+
+% ============================================================================
+\section{Động cơ hình thành FastViT}
+\label{sec:fastvit_motivation}
+
+% ----------------------------------------------------------------------------
+\subsection{Yêu cầu đối với mô hình thị giác hiện đại}
+
+Một mô hình thị giác lý tưởng cho triển khai thực tế cần đáp ứng đồng thời:
+
+\begin{enumerate}
+    \item \textbf{Độ chính xác cao} trên các benchmark tiêu chuẩn.
+    \item \textbf{Độ trễ thấp} (low latency) trên phần cứng mục tiêu.
+    \item \textbf{Ít tham số} để dễ lưu trữ và truyền tải.
+    \item \textbf{Chi phí FLOPs thấp} để tiết kiệm năng lượng.
+    \item \textbf{Khả năng triển khai đa nền tảng} (GPU, CPU, Mobile, FPGA).
+\end{enumerate}
+
+% ----------------------------------------------------------------------------
+\subsection{Kế thừa từ CNN}
+
+\subsubsection*{Structural Reparameterization}
+
+Từ \repvgg{} và MobileOne \cite{mobileone2023}, \fastvit{} kế thừa kỹ thuật reparameterization: sử dụng kiến trúc multi-branch khi huấn luyện (tăng accuracy) nhưng rút gọn về single-branch khi suy luận (giảm latency). Đây là chìa khóa giúp \fastvit{} ``ăn gian'' -- hưởng lợi từ overparameterization mà không trả giá về tốc độ.
+
+\subsubsection*{Hiệu quả suy luận}
+
+Depthwise convolution từ MobileNet, kết hợp với reparameterization từ RepVGG, tạo nên nền tảng cho RepMixer -- token mixer cốt lõi của \fastvit{} có chi phí $\bigO{N \cdot k^2}$ thay vì $\bigO{N^2}$ của Self-Attention.
+
+% ----------------------------------------------------------------------------
+\subsection{Kế thừa từ Vision Transformer}
+
+\subsubsection*{Global Context}
+
+\fastvit{} sử dụng Self-Attention ở stage cuối (khi kích thước feature map đã nhỏ) để thu nhận ngữ cảnh toàn cục với chi phí hợp lý. Với feature map $16 \times 16$ (256 token), chi phí attention là $256^2 \times d = 65{,}536 \cdot d$ -- chấp nhận được.
+
+\subsubsection*{Token Mixing}
+
+Ý tưởng ``token mixing'' từ MetaFormer \cite{metaformer2022}: hiệu suất của Transformer không đến từ attention cụ thể, mà từ \textit{kiến trúc tổng thể} (token mixer + FFN + residual). \fastvit{} thay thế token mixer ở các stage đầu bằng RepMixer -- depthwise conv reparameterizable, giữ nguyên cấu trúc MetaFormer.
+
+% ----------------------------------------------------------------------------
+\subsection{Sự ra đời của FastViT}
+
+Từ những phân tích trên, \fastvit{} \cite{fastvit2023} ra đời như một mô hình lai (hybrid), kết hợp:
+
+\begin{itemize}
+    \item \textbf{RepMixer} (từ CNN): Token mixing hiệu quả cho 3 stage đầu, chi phí $\bigO{N}$.
+    \item \textbf{Self-Attention} (từ ViT): Global context cho stage cuối, chi phí $\bigO{N^2}$ nhưng $N$ nhỏ.
+    \item \textbf{Structural Reparameterization} (từ RepVGG): Multi-branch training, single-branch inference.
+    \item \textbf{Depthwise Convolution} (từ MobileNet): Giảm chi phí tính toán.
+    \item \textbf{MetaFormer Architecture}: Cấu trúc token mixer + ConvFFN + residual.
+\end{itemize}
+
+Kết quả: \fastvit{} đạt \textbf{84.9\% Top-1 Accuracy} trên ImageNet với độ trễ chỉ \textbf{0.8--4.6ms} trên iPhone 12 Pro, nhanh hơn 3.5$\times$ so với CMT và 4.9$\times$ so với EfficientNet, đồng thời chính xác hơn.
