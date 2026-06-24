@@ -79,7 +79,7 @@ def main():
     model.eval()
 
     gt_dir = os.path.join(args.output_dir, "ground_truth")
-    pred_dir = os.path.join(args.output_dir, "predict")
+    pred_dir = os.path.join(args.output_dir, "predicts")
     os.makedirs(gt_dir, exist_ok=True)
     os.makedirs(pred_dir, exist_ok=True)
 
