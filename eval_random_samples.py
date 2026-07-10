@@ -7,18 +7,31 @@ from torch.utils.data import DataLoader, Subset
 from detection.visualize import save_detection_results, VOC_CLASSES
 from coco_dataset import build_coco_datasets, coco_collate, COCO_CLASSES
 from voc_dataset import build_voc_datasets, detection_collate
+from bdd100k_dataset import build_bdd100k_datasets, bdd100k_collate, BDD100K_CLASSES
 from detection.maskrcnn_detector import FastViTMaskRCNN
 from detection.fastvit_detector import FastViTDetector
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate on random samples with a specific threshold")
-    parser.add_argument("--dataset", type=str, default="coco", choices=["voc", "coco"])
+    parser = argparse.ArgumentParser(
+        description="Evaluate on random samples with a specific threshold"
+    )
+    parser.add_argument(
+        "--dataset", type=str, default="coco", choices=["voc", "coco", "bdd100k"]
+    )
     parser.add_argument("--data-dir", type=str, default="./data/coco")
-    parser.add_argument("--arch", type=str, default="maskrcnn", choices=["fastvit", "maskrcnn"])
+    parser.add_argument(
+        "--arch", type=str, default="maskrcnn", choices=["fastvit", "maskrcnn"]
+    )
     parser.add_argument("--model", type=str, default="fastvit_sa12")
     parser.add_argument("--checkpoint", type=str, default="best.pth")
     parser.add_argument("--num-samples", type=int, default=10)
-    parser.add_argument("--score-thresh", type=float, default=0.5, help="Threshold for visualization and prediction")
+    parser.add_argument(
+        "--score-thresh",
+        type=float,
+        default=0.5,
+        help="Threshold for visualization and prediction",
+    )
     parser.add_argument("--output-dir", type=str, default="./output/random_eval")
     args = parser.parse_args()
 
@@ -29,6 +42,11 @@ def main():
         collate_fn = coco_collate
         num_classes = 80
         class_names = COCO_CLASSES
+    elif args.dataset == "bdd100k":
+        _, val_dataset = build_bdd100k_datasets(data_dir=args.data_dir, img_size=800)
+        collate_fn = bdd100k_collate
+        num_classes = 10
+        class_names = BDD100K_CLASSES
     else:
         _, val_dataset = build_voc_datasets(data_dir=args.data_dir, img_size=800)
         collate_fn = detection_collate
@@ -63,17 +81,22 @@ def main():
             state_dict = checkpoint["state_dict"]
         else:
             state_dict = checkpoint
-        
+
         # Scrub incompatible keys
         model_dict = model.state_dict()
         filtered = {
-            k: v for k, v in state_dict.items()
+            k: v
+            for k, v in state_dict.items()
             if k in model_dict and v.shape == model_dict[k].shape
         }
         model.load_state_dict(filtered, strict=False)
-        print(f"Loaded checkpoint from {args.checkpoint} ({len(filtered)}/{len(model_dict)} keys matched)")
+        print(
+            f"Loaded checkpoint from {args.checkpoint} ({len(filtered)}/{len(model_dict)} keys matched)"
+        )
     else:
-        print(f"Warning: Checkpoint {args.checkpoint} not found. Using untrained weights.")
+        print(
+            f"Warning: Checkpoint {args.checkpoint} not found. Using untrained weights."
+        )
 
     model.to(device)
     model.eval()
@@ -83,18 +106,20 @@ def main():
     os.makedirs(gt_dir, exist_ok=True)
     os.makedirs(pred_dir, exist_ok=True)
 
-    print(f"Evaluating {args.num_samples} random samples with threshold {args.score_thresh}...")
-    
+    print(
+        f"Evaluating {args.num_samples} random samples with threshold {args.score_thresh}..."
+    )
+
     with torch.inference_mode():
         for i, (images, targets) in enumerate(dataloader):
             images = images.to(device)
-            
+
             # Predict
             predictions = model.predict(
-                images, 
-                score_thresh=args.score_thresh, 
-                nms_thresh=0.5, 
-                max_detections=100
+                images,
+                score_thresh=args.score_thresh,
+                nms_thresh=0.5,
+                max_detections=100,
             )
 
             # Convert predictions to CPU for visualization
@@ -106,10 +131,7 @@ def main():
             # Prepare ground truth for visualization
             gt_list = []
             for t in targets:
-                gt_list.append({
-                    "boxes": t["boxes"].cpu(),
-                    "labels": t["labels"].cpu()
-                })
+                gt_list.append({"boxes": t["boxes"].cpu(), "labels": t["labels"].cpu()})
 
             # Save prediction visualization
             save_detection_results(
@@ -119,12 +141,13 @@ def main():
                 class_names=class_names,
                 score_thresh=args.score_thresh,
             )
-            
+
             # Rename the saved pred file
             old_pred_name = os.path.join(pred_dir, "det_0000.jpg")
             new_pred_name = os.path.join(pred_dir, f"random_sample_{i+1}.jpg")
             if os.path.exists(old_pred_name):
-                if os.path.exists(new_pred_name): os.remove(new_pred_name)
+                if os.path.exists(new_pred_name):
+                    os.remove(new_pred_name)
                 os.rename(old_pred_name, new_pred_name)
 
             # Save ground truth visualization
@@ -135,16 +158,18 @@ def main():
                 class_names=class_names,
                 score_thresh=0.0,
             )
-            
+
             # Rename the saved gt file
             old_gt_name = os.path.join(gt_dir, "det_0000.jpg")
             new_gt_name = os.path.join(gt_dir, f"random_sample_{i+1}.jpg")
             if os.path.exists(old_gt_name):
-                if os.path.exists(new_gt_name): os.remove(new_gt_name)
+                if os.path.exists(new_gt_name):
+                    os.remove(new_gt_name)
                 os.rename(old_gt_name, new_gt_name)
-                
+
     print(f"Done! Ground truth saved to {gt_dir}")
     print(f"Done! Predictions saved to {pred_dir}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

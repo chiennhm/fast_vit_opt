@@ -29,9 +29,7 @@ def box_iou(boxes1, boxes2):
     inter_x2 = torch.min(boxes1[:, None, 2], boxes2[None, :, 2])
     inter_y2 = torch.min(boxes1[:, None, 3], boxes2[None, :, 3])
 
-    inter_area = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(
-        min=0
-    )
+    inter_area = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(min=0)
     union_area = area1[:, None] + area2[None, :] - inter_area
 
     return inter_area / (union_area + 1e-7)
@@ -64,7 +62,9 @@ class FocalLoss(nn.Module):
         # Only positive samples (target > 0) get a one-hot entry
         pos_mask = targets > 0
         pos_targets = (targets[pos_mask] - 1).long()  # Convert 1-indexed → 0-indexed
-        target_one_hot[pos_mask] = F.one_hot(pos_targets, num_classes).to(target_one_hot.dtype)
+        target_one_hot[pos_mask] = F.one_hot(pos_targets, num_classes).to(
+            target_one_hot.dtype
+        )
 
         # valid_mask: include both background (0) and positive (>0), exclude ignored (-1)
         valid_mask = targets >= 0
@@ -172,19 +172,25 @@ class AnchorGenerator:
             base_anchors = self._generate_base_anchors(self.sizes[idx]).to(device)
 
             # Create grid
-            shift_y = (torch.arange(fh, device=device, dtype=torch.float32) + 0.5) * stride_h
-            shift_x = (torch.arange(fw, device=device, dtype=torch.float32) + 0.5) * stride_w
+            shift_y = (
+                torch.arange(fh, device=device, dtype=torch.float32) + 0.5
+            ) * stride_h
+            shift_x = (
+                torch.arange(fw, device=device, dtype=torch.float32) + 0.5
+            ) * stride_w
             shift_y, shift_x = torch.meshgrid(shift_y, shift_x, indexing="ij")
             shifts = torch.stack(
-                [shift_x.reshape(-1), shift_y.reshape(-1),
-                 shift_x.reshape(-1), shift_y.reshape(-1)],
+                [
+                    shift_x.reshape(-1),
+                    shift_y.reshape(-1),
+                    shift_x.reshape(-1),
+                    shift_y.reshape(-1),
+                ],
                 dim=1,
             )
 
             # Combine shifts with base anchors
-            anchors = (
-                shifts.unsqueeze(1) + base_anchors.unsqueeze(0)
-            ).reshape(-1, 4)
+            anchors = (shifts.unsqueeze(1) + base_anchors.unsqueeze(0)).reshape(-1, 4)
             all_anchors.append(anchors)
 
         result = torch.cat(all_anchors, dim=0)
@@ -339,9 +345,7 @@ class DetectionLoss(nn.Module):
 
             # Assign labels
             # -1 = ignore, 0 = background, 1..C = object classes
-            cls_targets = torch.zeros(
-                anchors.shape[0], dtype=torch.long, device=device
-            )
+            cls_targets = torch.zeros(anchors.shape[0], dtype=torch.long, device=device)
 
             # Negative: IoU < neg_thresh
             cls_targets[max_iou < self.neg_iou_thresh] = 0
@@ -365,7 +369,9 @@ class DetectionLoss(nn.Module):
 
             # Encode regression targets (only for positive anchors)
             matched_gt = gt_boxes[max_idx[pos_mask]]
-            reg_targets_pos = encode_boxes(matched_gt, anchors[pos_mask], weights=BOX_WEIGHTS)
+            reg_targets_pos = encode_boxes(
+                matched_gt, anchors[pos_mask], weights=BOX_WEIGHTS
+            )
 
             num_pos = pos_mask.sum().item()
             total_pos += num_pos

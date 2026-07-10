@@ -14,10 +14,10 @@ import sys
 import time
 import math
 import logging
+import json
 from datetime import datetime
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.amp import autocast
 from torch.amp import GradScaler
@@ -25,24 +25,31 @@ from torch.amp import GradScaler
 # Optional tqdm import
 try:
     from tqdm import tqdm
+
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
+
     class tqdm:
         def __init__(self, iterable, total=None, desc="", leave=True, **kwargs):
             self.iterable = iterable
             self.total = total
             self.desc = desc
+
         def __iter__(self):
             return iter(self.iterable)
+
         def set_postfix(self, *args, **kwargs):
             pass
+
         def set_description(self, *args, **kwargs):
             pass
+
 
 # Optional wandb import
 try:
     import wandb
+
     HAS_WANDB = True
 except ImportError:
     HAS_WANDB = False
@@ -53,11 +60,11 @@ import numpy as np
 from detection.fastvit_detector import FastViTDetector
 from detection.maskrcnn_detector import FastViTMaskRCNN
 from detection.losses import DetectionLoss
-from detection.eval_coco import evaluate_coco, print_eval_results
+from detection.eval_coco import print_eval_results
 from detection.visualize import save_detection_results, VOC_CLASSES
 from voc_dataset import build_voc_datasets, detection_collate
 from coco_dataset import build_coco_datasets, coco_collate, COCO_CLASSES
-
+from bdd100k_dataset import BDD100K_CLASSES, build_bdd100k_datasets, bdd100k_collate
 
 # ============================================================================
 # Logging
@@ -80,215 +87,278 @@ def parse_args():
 
     # Data
     parser.add_argument(
-        "--dataset", type=str, default="voc", choices=["voc", "coco"],
-        help="Dataset to use for training/evaluation: voc or coco (default: voc)"
+        "--dataset",
+        type=str,
+        default="voc",
+        choices=["voc", "coco", "bdd100k"],
+        help="Dataset to use for training/evaluation: voc, coco, or bdd100k (default: voc)",
     )
     parser.add_argument(
-        "--data-dir", type=str, default="./data",
-        help="Root directory for VOC/COCO dataset (default: ./data)"
+        "--data-dir",
+        type=str,
+        default="./data",
+        help="Root directory for VOC/COCO dataset (default: ./data)",
     )
     parser.add_argument(
-        "--coco-train-img", type=str, default=None,
-        help="Custom path to COCO train images directory"
+        "--coco-train-img",
+        type=str,
+        default=None,
+        help="Custom path to COCO train images directory",
     )
     parser.add_argument(
-        "--coco-train-ann", type=str, default=None,
-        help="Custom path to COCO train annotations JSON file"
+        "--coco-train-ann",
+        type=str,
+        default=None,
+        help="Custom path to COCO train annotations JSON file",
     )
     parser.add_argument(
-        "--coco-val-img", type=str, default=None,
-        help="Custom path to COCO validation images directory"
+        "--coco-val-img",
+        type=str,
+        default=None,
+        help="Custom path to COCO validation images directory",
     )
     parser.add_argument(
-        "--coco-val-ann", type=str, default=None,
-        help="Custom path to COCO validation annotations JSON file"
+        "--coco-val-ann",
+        type=str,
+        default=None,
+        help="Custom path to COCO validation annotations JSON file",
     )
     parser.add_argument(
-        "--img-size", type=int, default=800,
-        help="Shortest side of input image (default: 800, paper standard)"
+        "--img-size",
+        type=int,
+        default=800,
+        help="Shortest side of input image (default: 800, paper standard)",
     )
     parser.add_argument(
-        "--no-download", action="store_true",
-        help="Don't auto-download VOC dataset"
+        "--no-download", action="store_true", help="Don't auto-download VOC dataset"
     )
 
     # Architecture
     parser.add_argument(
-        "--arch", type=str, default="fastvit",
+        "--arch",
+        type=str,
+        default="fastvit",
         choices=["fastvit", "maskrcnn"],
         help="Detector architecture: 'fastvit' (FastViT+FPN+RetinaNet) or "
-             "'maskrcnn' (FastViT-SA12+FPN+Mask R-CNN). Default: fastvit"
+        "'maskrcnn' (FastViT-SA12+FPN+Mask R-CNN). Default: fastvit",
     )
 
     # Model
     parser.add_argument(
-        "--model", type=str, default="fastvit_sa12",
+        "--model",
+        type=str,
+        default="fastvit_sa12",
         choices=[
-            "fastvit_t8", "fastvit_t12", "fastvit_s12",
-            "fastvit_sa12", "fastvit_sa24", "fastvit_sa36", "fastvit_ma36",
+            "fastvit_t8",
+            "fastvit_t12",
+            "fastvit_s12",
+            "fastvit_sa12",
+            "fastvit_sa24",
+            "fastvit_sa36",
+            "fastvit_ma36",
         ],
-        help="FastViT backbone variant (default: fastvit_sa12, used by both archs)"
+        help="FastViT backbone variant (default: fastvit_sa12, used by both archs)",
     )
     parser.add_argument(
-        "--fpn-channels", type=int, default=256,
-        help="FPN output channels (default: 256)"
+        "--fpn-channels",
+        type=int,
+        default=256,
+        help="FPN output channels (default: 256)",
     )
     parser.add_argument(
-        "--pretrained-backbone", type=str, default=None,
-        help="Path to pretrained backbone checkpoint (ImageNet weights, e.g. best.pth)"
+        "--pretrained-backbone",
+        type=str,
+        default=None,
+        help="Path to pretrained backbone checkpoint (ImageNet weights, e.g. best.pth)",
     )
 
     # Training
     parser.add_argument(
-        "--epochs", type=int, default=150,
-        help="Number of training epochs (default: 150)"
+        "--epochs",
+        type=int,
+        default=150,
+        help="Number of training epochs (default: 150)",
     )
     parser.add_argument(
-        "--batch-size", "-b", type=int, default=16,
-        help="Batch size (default: 16)"
+        "--batch-size", "-b", type=int, default=16, help="Batch size (default: 16)"
     )
     parser.add_argument(
-        "--lr", type=float, default=1e-4,
-        help="Initial learning rate (default: 1e-4)"
+        "--lr", type=float, default=1e-4, help="Initial learning rate (default: 1e-4)"
     )
     parser.add_argument(
-        "--weight-decay", type=float, default=0.05,
-        help="Weight decay (default: 0.05)"
+        "--weight-decay", type=float, default=0.05, help="Weight decay (default: 0.05)"
     )
     parser.add_argument(
-        "--warmup-epochs", type=int, default=5,
-        help="Warmup epochs (default: 5)"
+        "--warmup-epochs", type=int, default=5, help="Warmup epochs (default: 5)"
     )
     parser.add_argument(
-        "--warmup-iters", type=int, default=None,
-        help="Warmup iterations (default: None, overrides warmup-epochs if set)"
+        "--warmup-iters",
+        type=int,
+        default=None,
+        help="Warmup iterations (default: None, overrides warmup-epochs if set)",
     )
     parser.add_argument(
-        "--scheduler", type=str, default="step",
+        "--scheduler",
+        type=str,
+        default="step",
         choices=["step", "cosine"],
-        help="LR scheduler type: 'step' (warmup + step decay) or 'cosine' (warmup + cosine annealing). Default: step"
+        help="LR scheduler type: 'step' (warmup + step decay) or 'cosine' (warmup + cosine annealing). Default: step",
     )
     parser.add_argument(
-        "--lr-steps", nargs="+", type=int, default=[8, 11],
-        help="Epochs at which to decay LR by --lr-gamma (default: 8 11)"
+        "--lr-steps",
+        nargs="+",
+        type=int,
+        default=[8, 11],
+        help="Epochs at which to decay LR by --lr-gamma (default: 8 11)",
     )
     parser.add_argument(
-        "--lr-gamma", type=float, default=0.1,
-        help="LR decay factor at each milestone (default: 0.1)"
+        "--lr-gamma",
+        type=float,
+        default=0.1,
+        help="LR decay factor at each milestone (default: 0.1)",
     )
     parser.add_argument(
-        "--clip-grad", type=float, default=5.0,
-        help="Gradient clipping norm (default: 5.0)"
+        "--clip-grad",
+        type=float,
+        default=5.0,
+        help="Gradient clipping norm (default: 5.0)",
     )
     parser.add_argument(
-        "--accum-steps", type=int, default=1,
-        help="Number of steps to accumulate gradients (default: 1)"
+        "--accum-steps",
+        type=int,
+        default=1,
+        help="Number of steps to accumulate gradients (default: 1)",
     )
     parser.add_argument(
-        "--rpn-pre-nms-train", type=int, default=2000,
-        help="RPN pre-NMS proposals to keep during training (default: 2000)"
+        "--rpn-pre-nms-train",
+        type=int,
+        default=2000,
+        help="RPN pre-NMS proposals to keep during training (default: 2000)",
     )
     parser.add_argument(
-        "--rpn-post-nms-train", type=int, default=1000,
-        help="RPN post-NMS proposals to keep during training (default: 1000)"
+        "--rpn-post-nms-train",
+        type=int,
+        default=1000,
+        help="RPN post-NMS proposals to keep during training (default: 1000)",
     )
     parser.add_argument(
-        "--rpn-batch-size", type=int, default=128,
-        help="Anchors sampled per image for RPN loss calculation (default: 128)"
+        "--rpn-batch-size",
+        type=int,
+        default=128,
+        help="Anchors sampled per image for RPN loss calculation (default: 128)",
     )
     parser.add_argument(
-        "--box-batch-size", type=int, default=512,
-        help="Proposals sampled per image for Box/Mask heads loss (default: 512)"
+        "--box-batch-size",
+        type=int,
+        default=512,
+        help="Proposals sampled per image for Box/Mask heads loss (default: 512)",
     )
 
     # Loss
     parser.add_argument(
-        "--focal-alpha", type=float, default=0.25,
-        help="Focal loss alpha (default: 0.25)"
+        "--focal-alpha",
+        type=float,
+        default=0.25,
+        help="Focal loss alpha (default: 0.25)",
     )
     parser.add_argument(
-        "--focal-gamma", type=float, default=2.0,
-        help="Focal loss gamma (default: 2.0)"
+        "--focal-gamma", type=float, default=2.0, help="Focal loss gamma (default: 2.0)"
     )
 
     # AMP
     parser.add_argument(
-        "--amp", action="store_true", default=True,
-        help="Use automatic mixed precision (default: True)"
+        "--amp",
+        action="store_true",
+        default=True,
+        help="Use automatic mixed precision (default: True)",
     )
-    parser.add_argument(
-        "--no-amp", action="store_true",
-        help="Disable AMP"
-    )
+    parser.add_argument("--no-amp", action="store_true", help="Disable AMP")
 
     # Evaluation
     parser.add_argument(
-        "--eval-interval", type=int, default=5,
-        help="Evaluate every N epochs (default: 5)"
+        "--eval-interval",
+        type=int,
+        default=5,
+        help="Evaluate every N epochs (default: 5)",
     )
     parser.add_argument(
-        "--eval-only", action="store_true",
-        help="Only run evaluation on the validation set"
+        "--eval-only",
+        action="store_true",
+        help="Only run evaluation on the validation set",
     )
     parser.add_argument(
-        "--eval-batch-size", type=int, default=None,
+        "--eval-batch-size",
+        type=int,
+        default=None,
         help="Batch size for evaluation (default: min(batch_size, 4)). "
-             "Use a smaller value than training batch size to avoid OOM."
+        "Use a smaller value than training batch size to avoid OOM.",
     )
     parser.add_argument(
-        "--max-eval-samples", type=int, default=None,
+        "--max-eval-samples",
+        type=int,
+        default=None,
         help="Maximum number of validation samples to evaluate (default: all). "
-             "Useful for quick sanity checks or machines with limited RAM."
+        "Useful for quick sanity checks or machines with limited RAM.",
     )
 
     # Output
     parser.add_argument(
-        "--output", type=str, default="./output/detection",
-        help="Output directory (default: ./output/detection)"
+        "--output",
+        type=str,
+        default="./output/detection",
+        help="Output directory (default: ./output/detection)",
     )
     parser.add_argument(
-        "--resume", type=str, default=None,
-        help="Resume from checkpoint"
+        "--resume", type=str, default=None, help="Resume from checkpoint"
     )
     parser.add_argument(
-        "--save-visualizations", action="store_true",
-        help="Save detection visualizations during evaluation"
+        "--save-visualizations",
+        action="store_true",
+        help="Save detection visualizations during evaluation",
     )
 
     # Wandb
     parser.add_argument(
-        "--wandb-project", type=str, default="fastvit-detection",
-        help="Wandb project name (default: fastvit-detection)"
+        "--wandb-project",
+        type=str,
+        default="fastvit-detection",
+        help="Wandb project name (default: fastvit-detection)",
     )
     parser.add_argument(
-        "--wandb-name", type=str, default=None,
-        help="Wandb run name (default: auto-generated)"
+        "--wandb-name",
+        type=str,
+        default=None,
+        help="Wandb run name (default: auto-generated)",
     )
     parser.add_argument(
-        "--wandb-entity", type=str, default=None,
-        help="Wandb entity/team name (optional)"
+        "--wandb-entity",
+        type=str,
+        default=None,
+        help="Wandb entity/team name (optional)",
     )
-    parser.add_argument(
-        "--no-wandb", action="store_true",
-        help="Disable wandb logging"
-    )
+    parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
 
     # Misc
     parser.add_argument(
-        "--workers", "-j", type=int, default=4,
-        help="Number of data loading workers (default: 4)"
+        "--workers",
+        "-j",
+        type=int,
+        default=4,
+        help="Number of data loading workers (default: 4)",
     )
     parser.add_argument(
-        "--cache-ram", action="store_true",
-        help="Preload entire dataset images and annotations to RAM to eliminate disk I/O bottlenecks"
+        "--cache-ram",
+        action="store_true",
+        help="Preload entire dataset images and annotations to RAM to eliminate disk I/O bottlenecks",
     )
     parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed (default: 42)"
+        "--seed", type=int, default=42, help="Random seed (default: 42)"
     )
     parser.add_argument(
-        "--log-interval", type=int, default=100,
-        help="Log every N batches (default: 100)"
+        "--log-interval",
+        type=int,
+        default=100,
+        help="Log every N batches (default: 100)",
     )
 
     args = parser.parse_args()
@@ -330,7 +400,9 @@ class WarmupCosineScheduler:
             progress = (epoch - self.warmup_epochs) / max(
                 self.total_epochs - self.warmup_epochs, 1
             )
-            for pg, base_lr, min_lr in zip(self.optimizer.param_groups, self.base_lrs, self.min_lrs):
+            for pg, base_lr, min_lr in zip(
+                self.optimizer.param_groups, self.base_lrs, self.min_lrs
+            ):
                 pg["lr"] = min_lr + 0.5 * (base_lr - min_lr) * (
                     1 + math.cos(math.pi * progress)
                 )
@@ -359,13 +431,13 @@ class WarmupStepDecayScheduler:
         self.milestones = sorted(milestones)
         self.gamma = gamma
         self.base_lrs = [pg["lr"] for pg in optimizer.param_groups]
-        self._iter = 0       # global iteration counter
-        self._epoch = -1     # current epoch
+        self._iter = 0  # global iteration counter
+        self._epoch = -1  # current epoch
 
     def step_epoch(self, epoch):
         self._epoch = epoch
         n_decays = sum(1 for m in self.milestones if epoch >= m)
-        decay = self.gamma ** n_decays
+        decay = self.gamma**n_decays
         for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
             epoch_lr = base_lr * decay
             if self._iter >= self.warmup_iters:
@@ -377,7 +449,7 @@ class WarmupStepDecayScheduler:
             alpha = self._iter / self.warmup_iters
             factor = self.warmup_start_factor + (1.0 - self.warmup_start_factor) * alpha
             n_decays = sum(1 for m in self.milestones if self._epoch >= m)
-            decay = self.gamma ** n_decays
+            decay = self.gamma**n_decays
             for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
                 pg["lr"] = base_lr * decay * factor
 
@@ -388,7 +460,9 @@ class WarmupStepDecayScheduler:
 # ============================================================================
 # Training — FastViT (RetinaNet-style)
 # ============================================================================
-def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
+def train_one_epoch_fastvit(
+    model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=None
+):
     """Train FastViT+FPN+RetinaNet for one epoch.
 
     The model outputs (cls_preds, reg_preds, anchors); loss is computed
@@ -403,16 +477,17 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
     start_time = time.time()
     optimizer.zero_grad()
 
-    pbar = tqdm(enumerate(dataloader), total=num_batches, desc=f"Epoch {epoch}", leave=False)
+    pbar = tqdm(
+        enumerate(dataloader), total=num_batches, desc=f"Epoch {epoch}", leave=False
+    )
     for batch_idx, (images, targets) in pbar:
         images = images.to(device, non_blocking=True)
         targets = [
-            {k: v.to(device, non_blocking=True) for k, v in t.items()}
-            for t in targets
+            {k: v.to(device, non_blocking=True) for k, v in t.items()} for t in targets
         ]
 
         if args.amp and device.type == "cuda":
-            with autocast('cuda'):
+            with autocast("cuda"):
                 cls_preds, reg_preds, anchors = model(images)
                 loss_dict = criterion(cls_preds, reg_preds, anchors, targets)
                 unscaled_loss = loss_dict["cls_loss"] + loss_dict["reg_loss"]
@@ -420,10 +495,14 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
 
             scaler.scale(loss).backward()
             grad_norm = None
-            if (batch_idx + 1) % args.accum_steps == 0 or (batch_idx + 1) == num_batches:
+            if (batch_idx + 1) % args.accum_steps == 0 or (
+                batch_idx + 1
+            ) == num_batches:
                 if args.clip_grad:
                     scaler.unscale_(optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.clip_grad
+                    ).item()
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -437,9 +516,13 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
 
             loss.backward()
             grad_norm = None
-            if (batch_idx + 1) % args.accum_steps == 0 or (batch_idx + 1) == num_batches:
+            if (batch_idx + 1) % args.accum_steps == 0 or (
+                batch_idx + 1
+            ) == num_batches:
                 if args.clip_grad:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad).item()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.clip_grad
+                    ).item()
                 optimizer.step()
                 optimizer.zero_grad()
                 if scheduler is not None:
@@ -470,16 +553,17 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
 
         # Console logging
         if HAS_TQDM:
-            pbar.set_postfix({
-                "cls": f"{cls_loss_val:.4f}",
-                "reg": f"{reg_loss_val:.4f}",
-                "tot": f"{total_loss_val:.4f}",
-                "pos": loss_dict["num_pos"],
-            })
+            pbar.set_postfix(
+                {
+                    "cls": f"{cls_loss_val:.4f}",
+                    "reg": f"{reg_loss_val:.4f}",
+                    "tot": f"{total_loss_val:.4f}",
+                    "pos": loss_dict["num_pos"],
+                }
+            )
         elif (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
             elapsed = time.time() - start_time
             eta = elapsed / (batch_idx + 1) * (num_batches - batch_idx - 1)
-            lr_backbone = optimizer.param_groups[0]["lr"]
             lr_head = optimizer.param_groups[2]["lr"]
             logger.info(
                 f"Epoch [{epoch}][{batch_idx+1}/{num_batches}] "
@@ -504,9 +588,7 @@ def train_one_epoch_fastvit(model, criterion, dataloader, optimizer, scaler, dev
 # ============================================================================
 # Training — Mask R-CNN (torchvision-style)
 # ============================================================================
-def _prepare_maskrcnn_targets(
-    targets: list, device: torch.device
-) -> list:
+def _prepare_maskrcnn_targets(targets: list, device: torch.device) -> list:
     """Convert dataset targets to torchvision Mask R-CNN format.
 
     torchvision expects List[Dict] where each dict has at minimum:
@@ -525,12 +607,16 @@ def _prepare_maskrcnn_targets(
             valid_mask = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
             if not valid_mask.all().item():
                 t = {
-                    k: v[valid_mask] if k in {"boxes", "labels", "masks", "area", "iscrowd", "difficults"} else v
+                    k: (
+                        v[valid_mask]
+                        if k
+                        in {"boxes", "labels", "masks", "area", "iscrowd", "difficults"}
+                        else v
+                    )
                     for k, v in t.items()
                 }
 
-        d = {k: v.to(device, non_blocking=True)
-             for k, v in t.items() if k in allowed}
+        d = {k: v.to(device, non_blocking=True) for k, v in t.items() if k in allowed}
         # Ensure boxes is float and labels is int64
         d["boxes"] = d["boxes"].float()
         d["labels"] = d["labels"].long()
@@ -538,7 +624,9 @@ def _prepare_maskrcnn_targets(
     return out
 
 
-def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
+def train_one_epoch_maskrcnn(
+    model, dataloader, optimizer, scaler, device, epoch, args, scheduler=None
+):
     """Train FastViTMaskRCNN for one epoch.
 
     torchvision Mask R-CNN computes all losses **internally** when called as
@@ -555,20 +643,24 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
 
     optimizer.zero_grad()
 
-    pbar = tqdm(enumerate(dataloader), total=num_batches, desc=f"Epoch {epoch}", leave=False)
+    pbar = tqdm(
+        enumerate(dataloader), total=num_batches, desc=f"Epoch {epoch}", leave=False
+    )
     for batch_idx, (images, targets) in pbar:
         # torchvision expects List[Tensor], not a batched (B, C, H, W) tensor
         image_list = [img.to(device, non_blocking=True) for img in images.unbind(0)]
         target_list = _prepare_maskrcnn_targets(targets, device)
 
         if args.amp and device.type == "cuda":
-            with autocast('cuda'):
+            with autocast("cuda"):
                 loss_dict = model(image_list, target_list)
                 unscaled_loss = sum(loss_dict.values())
                 loss = unscaled_loss / args.accum_steps
             scaler.scale(loss).backward()
             grad_norm = None
-            if (batch_idx + 1) % args.accum_steps == 0 or (batch_idx + 1) == num_batches:
+            if (batch_idx + 1) % args.accum_steps == 0 or (
+                batch_idx + 1
+            ) == num_batches:
                 if args.clip_grad:
                     scaler.unscale_(optimizer)
                     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -585,7 +677,9 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
             loss = unscaled_loss / args.accum_steps
             loss.backward()
             grad_norm = None
-            if (batch_idx + 1) % args.accum_steps == 0 or (batch_idx + 1) == num_batches:
+            if (batch_idx + 1) % args.accum_steps == 0 or (
+                batch_idx + 1
+            ) == num_batches:
                 if args.clip_grad:
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), args.clip_grad
@@ -602,34 +696,36 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
 
         # Unpack individual losses for logging
         cls_loss_val = loss_dict.get("loss_classifier", torch.tensor(0.0)).item()
-        box_loss_val = loss_dict.get("loss_box_reg",    torch.tensor(0.0)).item()
-        mask_loss_val = loss_dict.get("loss_mask",       torch.tensor(0.0)).item()
-        rpn_cls_val   = loss_dict.get("loss_objectness", torch.tensor(0.0)).item()
-        rpn_box_val   = loss_dict.get("loss_rpn_box_reg", torch.tensor(0.0)).item()
+        box_loss_val = loss_dict.get("loss_box_reg", torch.tensor(0.0)).item()
+        mask_loss_val = loss_dict.get("loss_mask", torch.tensor(0.0)).item()
+        rpn_cls_val = loss_dict.get("loss_objectness", torch.tensor(0.0)).item()
+        rpn_box_val = loss_dict.get("loss_rpn_box_reg", torch.tensor(0.0)).item()
 
         global_step = epoch * num_batches + batch_idx
         if args.use_wandb:
             log_dict = {
-                "train/total_loss":     total_loss_val,
-                "train/cls_loss":       cls_loss_val,
-                "train/box_loss":       box_loss_val,
-                "train/mask_loss":      mask_loss_val,
-                "train/rpn_cls_loss":   rpn_cls_val,
-                "train/rpn_box_loss":   rpn_box_val,
-                "train/lr_backbone":    optimizer.param_groups[0]["lr"],
-                "train/lr_head":        optimizer.param_groups[2]["lr"],
+                "train/total_loss": total_loss_val,
+                "train/cls_loss": cls_loss_val,
+                "train/box_loss": box_loss_val,
+                "train/mask_loss": mask_loss_val,
+                "train/rpn_cls_loss": rpn_cls_val,
+                "train/rpn_box_loss": rpn_box_val,
+                "train/lr_backbone": optimizer.param_groups[0]["lr"],
+                "train/lr_head": optimizer.param_groups[2]["lr"],
             }
             if grad_norm is not None:
                 log_dict["train/grad_norm"] = grad_norm
             wandb.log(log_dict, step=global_step)
 
         if HAS_TQDM:
-            pbar.set_postfix({
-                "tot": f"{total_loss_val:.4f}",
-                "cls": f"{cls_loss_val:.4f}",
-                "box": f"{box_loss_val:.4f}",
-                "mask": f"{mask_loss_val:.4f}",
-            })
+            pbar.set_postfix(
+                {
+                    "tot": f"{total_loss_val:.4f}",
+                    "cls": f"{cls_loss_val:.4f}",
+                    "box": f"{box_loss_val:.4f}",
+                    "mask": f"{mask_loss_val:.4f}",
+                }
+            )
         elif (batch_idx + 1) % args.log_interval == 0 or (batch_idx + 1) == num_batches:
             elapsed = time.time() - start_time
             eta = elapsed / (batch_idx + 1) * (num_batches - batch_idx - 1)
@@ -651,14 +747,31 @@ def train_one_epoch_maskrcnn(model, dataloader, optimizer, scaler, device, epoch
 # ============================================================================
 # Dispatcher — picks correct train function based on arch
 # ============================================================================
-def train_one_epoch(model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=None):
+def train_one_epoch(
+    model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=None
+):
     """Dispatch to FastViT or Mask R-CNN training loop."""
     if args.arch == "maskrcnn":
         return train_one_epoch_maskrcnn(
-            model, dataloader, optimizer, scaler, device, epoch, args, scheduler=scheduler
+            model,
+            dataloader,
+            optimizer,
+            scaler,
+            device,
+            epoch,
+            args,
+            scheduler=scheduler,
         )
     return train_one_epoch_fastvit(
-        model, criterion, dataloader, optimizer, scaler, device, epoch, args, scheduler=scheduler
+        model,
+        criterion,
+        dataloader,
+        optimizer,
+        scaler,
+        device,
+        epoch,
+        args,
+        scheduler=scheduler,
     )
 
 
@@ -695,7 +808,9 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
         logger.info(f"  Max eval samples capped at {max_eval_samples}")
     start_time = time.time()
 
-    pbar = tqdm(enumerate(dataloader), total=total_batches, desc="Evaluating", leave=False)
+    pbar = tqdm(
+        enumerate(dataloader), total=total_batches, desc="Evaluating", leave=False
+    )
     for batch_idx, (images, targets) in pbar:
         # Early exit if we have collected enough samples
         if max_eval_samples is not None and total_images_seen >= max_eval_samples:
@@ -705,7 +820,7 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
 
         # Get predictions (use AMP for faster inference)
         if use_amp:
-            with autocast('cuda'):
+            with autocast("cuda"):
                 predictions = model.predict(
                     images, score_thresh=0.05, nms_thresh=0.5, max_detections=100
                 )
@@ -741,7 +856,12 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
         # Save visualizations for first few batches
         if save_vis and output_dir and batch_idx < 5:
             vis_dir = os.path.join(output_dir, "visualizations")
-            class_names = COCO_CLASSES if args.dataset == "coco" else VOC_CLASSES
+            if args.dataset == "coco":
+                class_names = COCO_CLASSES
+            elif args.dataset == "bdd100k":
+                class_names = BDD100K_CLASSES
+            else:
+                class_names = VOC_CLASSES
             save_detection_results(
                 images,
                 predictions,
@@ -759,7 +879,9 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
         if not HAS_TQDM and (batch_idx + 1) % args.log_interval == 0:
             elapsed_so_far = time.time() - start_time
             speed = total_images_seen / max(elapsed_so_far, 1e-6)
-            remaining = (total_batches - batch_idx - 1) * (elapsed_so_far / (batch_idx + 1))
+            remaining = (total_batches - batch_idx - 1) * (
+                elapsed_so_far / (batch_idx + 1)
+            )
             logger.info(
                 f"  Eval batch {batch_idx+1}/{total_batches}  "
                 f"({total_images_seen} imgs, {speed:.1f} img/s, ETA {remaining:.0f}s)"
@@ -771,25 +893,53 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
     gc.collect()
 
     elapsed = time.time() - start_time
-    logger.info(f"Evaluation inference completed in {elapsed:.1f}s ({total_images_seen} images)")
-
-    # Compute mAP
-    if args.dataset == "coco":
-        num_classes = 80
-        class_names = COCO_CLASSES
-        iou_threshold = np.linspace(0.5, 0.95, 10).tolist()
-    else:
-        num_classes = 20
-        class_names = VOC_CLASSES
-        iou_threshold = 0.5
-
-    results = evaluate_coco(
-        all_predictions,
-        all_ground_truths,
-        num_classes=num_classes,
-        iou_threshold=iou_threshold,
-        class_names=class_names,
+    logger.info(
+        f"Evaluation inference completed in {elapsed:.1f}s ({total_images_seen} images)"
     )
+
+    # Format and save predictions to JSON file instead of computing mAP
+    serialized_predictions = []
+    for pred_idx, pred in enumerate(all_predictions):
+        serialized_pred = {
+            "image_idx": pred_idx,
+            "boxes": (
+                pred["boxes"].tolist()
+                if isinstance(pred["boxes"], np.ndarray)
+                else pred["boxes"]
+            ),
+            "labels": (
+                pred["labels"].tolist()
+                if isinstance(pred["labels"], np.ndarray)
+                else pred["labels"]
+            ),
+            "scores": (
+                pred["scores"].tolist()
+                if isinstance(pred["scores"], np.ndarray)
+                else pred["scores"]
+            ),
+        }
+        serialized_predictions.append(serialized_pred)
+
+    out_dir = output_dir if output_dir else "./"
+    os.makedirs(out_dir, exist_ok=True)
+    json_path = os.path.join(out_dir, "predictions.json")
+    with open(json_path, "w") as f:
+        json.dump(serialized_predictions, f, indent=2)
+    logger.info(f"Predictions successfully saved to {json_path}")
+
+    # Determine class names for returning dummy results
+    if args.dataset == "coco":
+        class_names = COCO_CLASSES
+    elif args.dataset == "bdd100k":
+        class_names = BDD100K_CLASSES
+    else:
+        class_names = VOC_CLASSES
+
+    results = {
+        "map": 0.0,
+        "ap": [0.0] * len(class_names),
+        "class_ap": {name: 0.0 for name in class_names},
+    }
 
     # Free the large prediction/gt lists after mAP is computed
     del all_predictions, all_ground_truths
@@ -842,7 +992,9 @@ def main():
     logger.info(f"Using device: {device}")
     if device.type == "cuda":
         logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
-        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        logger.info(
+            f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
+        )
 
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -889,6 +1041,13 @@ def main():
             cache_ram=args.cache_ram,
         )
         collate_fn = coco_collate
+    elif args.dataset == "bdd100k":
+        train_dataset, val_dataset = build_bdd100k_datasets(
+            data_dir=args.data_dir,
+            img_size=args.img_size,
+            cache_ram=args.cache_ram,
+        )
+        collate_fn = bdd100k_collate
     else:
         train_dataset, val_dataset = build_voc_datasets(
             data_dir=args.data_dir,
@@ -909,7 +1068,11 @@ def main():
     )
 
     # Use a separate (smaller) batch size for evaluation to avoid OOM.
-    eval_bs = args.eval_batch_size if args.eval_batch_size is not None else min(args.batch_size, 4)
+    eval_bs = (
+        args.eval_batch_size
+        if args.eval_batch_size is not None
+        else min(args.batch_size, 4)
+    )
     logger.info(f"Eval batch size: {eval_bs}  (train batch size: {args.batch_size})")
 
     val_loader = DataLoader(
@@ -927,7 +1090,12 @@ def main():
     # ========================================================================
     # Model
     # ========================================================================
-    num_classes = 80 if args.dataset == "coco" else 20
+    if args.dataset == "coco":
+        num_classes = 80
+    elif args.dataset == "bdd100k":
+        num_classes = 10
+    else:
+        num_classes = 20
 
     if args.arch == "maskrcnn":
         # ── Mask R-CNN: FastViT-SA12 backbone + torchvision RPN/RoI heads ──
@@ -998,15 +1166,26 @@ def main():
             if not param.requires_grad:
                 continue
             is_backbone = "backbone" in name
-            if "bias" in name or "bn" in name or "norm" in name or "layer_scale" in name:
-                (backbone_no_decay_params if is_backbone else no_decay_params).append(param)
+            if (
+                "bias" in name
+                or "bn" in name
+                or "norm" in name
+                or "layer_scale" in name
+            ):
+                (backbone_no_decay_params if is_backbone else no_decay_params).append(
+                    param
+                )
             else:
                 (backbone_decay_params if is_backbone else decay_params).append(param)
         param_groups = [
-            {"params": backbone_decay_params,    "weight_decay": args.weight_decay, "lr": args.lr},
-            {"params": backbone_no_decay_params, "weight_decay": 0.0,               "lr": args.lr},
-            {"params": decay_params,             "weight_decay": args.weight_decay, "lr": args.lr},
-            {"params": no_decay_params,          "weight_decay": 0.0,               "lr": args.lr},
+            {
+                "params": backbone_decay_params,
+                "weight_decay": args.weight_decay,
+                "lr": args.lr,
+            },
+            {"params": backbone_no_decay_params, "weight_decay": 0.0, "lr": args.lr},
+            {"params": decay_params, "weight_decay": args.weight_decay, "lr": args.lr},
+            {"params": no_decay_params, "weight_decay": 0.0, "lr": args.lr},
         ]
 
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
@@ -1030,7 +1209,9 @@ def main():
                 warmup_epochs = max(1, int(round(args.warmup_iters / iters_per_epoch)))
             else:
                 warmup_epochs = 0
-            logger.info(f"Using warmup-iters={args.warmup_iters} -> warmup-epochs={warmup_epochs}")
+            logger.info(
+                f"Using warmup-iters={args.warmup_iters} -> warmup-epochs={warmup_epochs}"
+            )
         else:
             warmup_epochs = args.warmup_epochs
             logger.info(f"Using warmup-epochs={warmup_epochs}")
@@ -1040,9 +1221,11 @@ def main():
             warmup_epochs=warmup_epochs,
             total_epochs=args.epochs,
         )
-        logger.info(f"Using cosine scheduler: warmup_epochs={warmup_epochs}, total_epochs={args.epochs}")
+        logger.info(
+            f"Using cosine scheduler: warmup_epochs={warmup_epochs}, total_epochs={args.epochs}"
+        )
 
-    scaler = GradScaler('cuda') if args.amp and device.type == "cuda" else None
+    scaler = GradScaler("cuda") if args.amp and device.type == "cuda" else None
 
     # ========================================================================
     # Resume
@@ -1051,9 +1234,7 @@ def main():
     best_map = 0.0
 
     if args.resume:
-        start_epoch, best_map = load_checkpoint(
-            args.resume, model, optimizer, scaler
-        )
+        start_epoch, best_map = load_checkpoint(args.resume, model, optimizer, scaler)
         # Prevent scheduler from repeating warmup when resuming
         if start_epoch > 0 and args.scheduler == "step":
             scheduler._iter = start_epoch * len(train_loader)
@@ -1067,8 +1248,12 @@ def main():
             logger.error("--eval-only requires --resume to specify checkpoint")
             sys.exit(1)
         results = evaluate(
-            model, val_loader, device, args,
-            save_vis=args.save_visualizations, output_dir=output_dir,
+            model,
+            val_loader,
+            device,
+            args,
+            save_vis=args.save_visualizations,
+            output_dir=output_dir,
         )
         print_eval_results(results, logger_fn=logger.info)
         return
@@ -1093,11 +1278,21 @@ def main():
         scheduler.step_epoch(epoch)
         lr_backbone = optimizer.param_groups[0]["lr"]
         lr_head = optimizer.param_groups[2]["lr"]
-        logger.info(f"\nEpoch {epoch}/{args.epochs - 1} | LR Head: {lr_head:.6f} | LR Backbone: {lr_backbone:.6f}")
+        logger.info(
+            f"\nEpoch {epoch}/{args.epochs - 1} | LR Head: {lr_head:.6f} | LR Backbone: {lr_backbone:.6f}"
+        )
 
         # Train
         train_metrics = train_one_epoch(
-            model, criterion, train_loader, optimizer, scaler, device, epoch, args, scheduler=scheduler
+            model,
+            criterion,
+            train_loader,
+            optimizer,
+            scaler,
+            device,
+            epoch,
+            args,
+            scheduler=scheduler,
         )
 
         logger.info(
@@ -1108,12 +1303,17 @@ def main():
         )
 
         # Evaluate
-        is_eval_epoch = (epoch + 1) % args.eval_interval == 0 or epoch == args.epochs - 1
+        is_eval_epoch = (
+            epoch + 1
+        ) % args.eval_interval == 0 or epoch == args.epochs - 1
         current_map = None
         is_best = False
         if is_eval_epoch:
             results = evaluate(
-                model, val_loader, device, args,
+                model,
+                val_loader,
+                device,
+                args,
                 save_vis=args.save_visualizations and epoch == args.epochs - 1,
                 output_dir=output_dir,
             )

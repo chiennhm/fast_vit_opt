@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from torchvision.ops import nms, batched_nms
+from torchvision.ops import batched_nms
 
 from timm.models import create_model
 import models  # noqa: F401, registers FastViT variants
@@ -150,9 +150,7 @@ class RetinaNetHead(nn.Module):
 
             cls_out = self.cls_subnet(feature)
             cls_out = self.cls_score(cls_out)
-            cls_out = cls_out.permute(0, 2, 3, 1).reshape(
-                B, -1, self.num_classes
-            )
+            cls_out = cls_out.permute(0, 2, 3, 1).reshape(B, -1, self.num_classes)
             cls_preds.append(cls_out)
 
             reg_out = self.reg_subnet(feature)
@@ -180,10 +178,26 @@ class FastViTDetector(nn.Module):
     """
 
     VOC_CLASSES = [
-        "aeroplane", "bicycle", "bird", "boat", "bottle",
-        "bus", "car", "cat", "chair", "cow",
-        "diningtable", "dog", "horse", "motorbike", "person",
-        "pottedplant", "sheep", "sofa", "train", "tvmonitor",
+        "aeroplane",
+        "bicycle",
+        "bird",
+        "boat",
+        "bottle",
+        "bus",
+        "car",
+        "cat",
+        "chair",
+        "cow",
+        "diningtable",
+        "dog",
+        "horse",
+        "motorbike",
+        "person",
+        "pottedplant",
+        "sheep",
+        "sofa",
+        "train",
+        "tvmonitor",
     ]
 
     # Embed dims for each FastViT variant
@@ -234,7 +248,8 @@ class FastViTDetector(nn.Module):
             # Scrub incompatible keys
             model_dict = self.backbone.state_dict()
             filtered = {
-                k: v for k, v in state_dict.items()
+                k: v
+                for k, v in state_dict.items()
                 if k in model_dict and v.shape == model_dict[k].shape
             }
             self.backbone.load_state_dict(filtered, strict=False)
@@ -334,16 +349,20 @@ class FastViTDetector(nn.Module):
             candidate_mask = candidate_mask & topk_mask
 
             if not candidate_mask.any():
-                results.append({
-                    "boxes": torch.zeros((0, 4), device=images.device),
-                    "scores": torch.zeros((0,), device=images.device),
-                    "labels": torch.zeros((0,), dtype=torch.long, device=images.device),
-                })
+                results.append(
+                    {
+                        "boxes": torch.zeros((0, 4), device=images.device),
+                        "scores": torch.zeros((0,), device=images.device),
+                        "labels": torch.zeros(
+                            (0,), dtype=torch.long, device=images.device
+                        ),
+                    }
+                )
                 continue
 
-            scores = scores[candidate_mask]       # (K, C)
+            scores = scores[candidate_mask]  # (K, C)
             box_deltas = box_deltas[candidate_mask]  # (K, 4)
-            cand_anchors = anchors[candidate_mask]   # (K, 4)
+            cand_anchors = anchors[candidate_mask]  # (K, 4)
 
             # Decode boxes
             boxes = decode_boxes(box_deltas, cand_anchors, weights=BOX_WEIGHTS)
@@ -357,9 +376,15 @@ class FastViTDetector(nn.Module):
             # --- Flatten to (K*C) for batched NMS ---
             K, C = scores.shape
             # Expand boxes: each anchor has C copies (one per class)
-            flat_boxes = boxes.unsqueeze(1).expand(K, C, 4).reshape(-1, 4)    # (K*C, 4)
-            flat_scores = scores.reshape(-1)                                   # (K*C,)
-            flat_labels = torch.arange(C, device=scores.device).unsqueeze(0).expand(K, C).reshape(-1) + 1  # 1-indexed
+            flat_boxes = boxes.unsqueeze(1).expand(K, C, 4).reshape(-1, 4)  # (K*C, 4)
+            flat_scores = scores.reshape(-1)  # (K*C,)
+            flat_labels = (
+                torch.arange(C, device=scores.device)
+                .unsqueeze(0)
+                .expand(K, C)
+                .reshape(-1)
+                + 1
+            )  # 1-indexed
 
             # Per-class score filter
             keep = flat_scores > score_thresh
@@ -368,11 +393,15 @@ class FastViTDetector(nn.Module):
             flat_labels = flat_labels[keep]
 
             if len(flat_scores) == 0:
-                results.append({
-                    "boxes": torch.zeros((0, 4), device=images.device),
-                    "scores": torch.zeros((0,), device=images.device),
-                    "labels": torch.zeros((0,), dtype=torch.long, device=images.device),
-                })
+                results.append(
+                    {
+                        "boxes": torch.zeros((0, 4), device=images.device),
+                        "scores": torch.zeros((0,), device=images.device),
+                        "labels": torch.zeros(
+                            (0,), dtype=torch.long, device=images.device
+                        ),
+                    }
+                )
                 continue
 
             # Batched NMS (uses label as class offset — single call replaces 20 per-class loops)
@@ -382,11 +411,12 @@ class FastViTDetector(nn.Module):
             if len(keep_idx) > max_detections:
                 keep_idx = keep_idx[:max_detections]
 
-            results.append({
-                "boxes": flat_boxes[keep_idx],
-                "scores": flat_scores[keep_idx],
-                "labels": flat_labels[keep_idx],
-            })
+            results.append(
+                {
+                    "boxes": flat_boxes[keep_idx],
+                    "scores": flat_scores[keep_idx],
+                    "labels": flat_labels[keep_idx],
+                }
+            )
 
         return results
-

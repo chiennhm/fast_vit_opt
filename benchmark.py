@@ -10,7 +10,6 @@
 
 import argparse
 import os
-import sys
 import time
 import json
 import csv
@@ -20,31 +19,34 @@ from datetime import datetime
 from contextlib import contextmanager
 
 import torch
-import torch.nn as nn
 import numpy as np
 
-import models  # registers FastViT variants
+import models  # noqa: F401 # registers FastViT variants
 from timm.models import create_model
 
 # Optional imports
 try:
     from fvcore.nn import FlopCountAnalysis, parameter_count
+
     HAS_FVCORE = True
 except ImportError:
     HAS_FVCORE = False
 
 try:
     import pynvml
+
     HAS_PYNVML = True
 except ImportError:
     try:
         import nvidia_smi as pynvml
+
         HAS_PYNVML = True
     except ImportError:
         HAS_PYNVML = False
 
 try:
     from models.modules.mobileone import reparameterize_model
+
     HAS_REPARAM = True
 except ImportError:
     HAS_REPARAM = False
@@ -54,8 +56,13 @@ except ImportError:
 # Constants
 # ============================================================================
 ALL_VARIANTS = [
-    "fastvit_t8", "fastvit_t12", "fastvit_s12",
-    "fastvit_sa12", "fastvit_sa24", "fastvit_sa36", "fastvit_ma36",
+    "fastvit_t8",
+    "fastvit_t12",
+    "fastvit_s12",
+    "fastvit_sa12",
+    "fastvit_sa24",
+    "fastvit_sa36",
+    "fastvit_ma36",
 ]
 
 
@@ -181,7 +188,12 @@ def count_flops_params(model, input_tensor):
 # Latency & Throughput benchmark
 # ============================================================================
 def benchmark_latency(
-    model, input_shape, device, warmup=50, iterations=200, use_amp=False,
+    model,
+    input_shape,
+    device,
+    warmup=50,
+    iterations=200,
+    use_amp=False,
     energy_monitor=None,
 ):
     """Measure inference latency and throughput.
@@ -251,7 +263,9 @@ def benchmark_latency(
         "max_ms": round(float(np.max(latencies)), 3),
         "p95_ms": round(float(np.percentile(latencies, 95)), 3),
         "p99_ms": round(float(np.percentile(latencies, 99)), 3),
-        "throughput_img_per_s": round(batch_size * 1000.0 / float(np.mean(latencies)), 2),
+        "throughput_img_per_s": round(
+            batch_size * 1000.0 / float(np.mean(latencies)), 2
+        ),
     }
 
     if energy_monitor and energy_monitor.available:
@@ -282,6 +296,7 @@ def build_model(variant, mode, device, reparam=False, checkpoint=None):
     """
     if mode == "detection":
         from detection.fastvit_detector import FastViTDetector
+
         model = FastViTDetector(model_name=variant, num_classes=20)
     else:
         model = create_model(variant, num_classes=1000)
@@ -387,7 +402,9 @@ def save_results(results, system_info, output_dir):
             w = csv.DictWriter(f, fieldnames=keys)
             w.writeheader()
             for r in results:
-                w.writerow({k: str(v) if isinstance(v, dict) else v for k, v in r.items()})
+                w.writerow(
+                    {k: str(v) if isinstance(v, dict) else v for k, v in r.items()}
+                )
 
     print(f"\nResults saved to: {json_path}")
     print(f"                  {csv_path}")
@@ -399,31 +416,57 @@ def save_results(results, system_info, output_dir):
 def main():
     parser = argparse.ArgumentParser(description="FastViT Benchmark")
     parser.add_argument(
-        "--model", type=str, nargs="+", default=["fastvit_sa12"],
+        "--model",
+        type=str,
+        nargs="+",
+        default=["fastvit_sa12"],
         help="Model variants to benchmark. Use 'all' for all variants.",
     )
     parser.add_argument(
-        "--mode", type=str, default="backbone", choices=["backbone", "detection"],
+        "--mode",
+        type=str,
+        default="backbone",
+        choices=["backbone", "detection"],
         help="Benchmark mode: backbone (classification) or detection (full detector)",
     )
     parser.add_argument(
-        "--img-size", type=int, nargs="+", default=[256],
+        "--img-size",
+        type=int,
+        nargs="+",
+        default=[256],
         help="Input image sizes to test (default: 256)",
     )
     parser.add_argument(
-        "--batch-size", type=int, nargs="+", default=[1],
+        "--batch-size",
+        type=int,
+        nargs="+",
+        default=[1],
         help="Batch sizes to test (default: 1)",
     )
     parser.add_argument("--warmup", type=int, default=50, help="Warmup iterations")
     parser.add_argument("--iterations", type=int, default=200, help="Timed iterations")
     parser.add_argument("--amp", action="store_true", help="Use FP16 (AMP)")
-    parser.add_argument("--reparam", action="store_true", help="Reparameterize model before benchmarking")
-    parser.add_argument("--cpu", action="store_true", help="Force CPU")
-    parser.add_argument("--energy", action="store_true", help="Enable GPU energy monitoring (requires pynvml)")
-    parser.add_argument("--output", type=str, default="./output/benchmark", help="Output directory")
-    parser.add_argument("--no-save", action="store_true", help="Don't save results to files")
     parser.add_argument(
-        "--checkpoint", type=str, default=None,
+        "--reparam",
+        action="store_true",
+        help="Reparameterize model before benchmarking",
+    )
+    parser.add_argument("--cpu", action="store_true", help="Force CPU")
+    parser.add_argument(
+        "--energy",
+        action="store_true",
+        help="Enable GPU energy monitoring (requires pynvml)",
+    )
+    parser.add_argument(
+        "--output", type=str, default="./output/benchmark", help="Output directory"
+    )
+    parser.add_argument(
+        "--no-save", action="store_true", help="Don't save results to files"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
         help="Path to .pth checkpoint to load weights from (use with --model variant_name)",
     )
 
@@ -432,7 +475,11 @@ def main():
     # Resolve models
     variants = ALL_VARIANTS if "all" in args.model else args.model
 
-    device = torch.device("cpu") if args.cpu or not torch.cuda.is_available() else torch.device("cuda:0")
+    device = (
+        torch.device("cpu")
+        if args.cpu or not torch.cuda.is_available()
+        else torch.device("cuda:0")
+    )
     system_info = get_system_info(device)
 
     print("=" * 70)
@@ -451,9 +498,9 @@ def main():
     if args.energy:
         energy_monitor = GPUEnergyMonitor()
         if energy_monitor.available:
-            print(f"  Energy:      Enabled (pynvml)")
+            print("  Energy:      Enabled (pynvml)")
         else:
-            print(f"  Energy:      Not available (install pynvml or check GPU)")
+            print("  Energy:      Not available (install pynvml or check GPU)")
 
     all_results = []
 
@@ -465,8 +512,11 @@ def main():
 
                 try:
                     model = build_model(
-                        variant, args.mode, device,
-                        reparam=args.reparam, checkpoint=args.checkpoint,
+                        variant,
+                        args.mode,
+                        device,
+                        reparam=args.reparam,
+                        checkpoint=args.checkpoint,
                     )
 
                     # FLOPs / params (always batch=1)
@@ -477,9 +527,13 @@ def main():
                     input_shape = (batch_size, 3, img_size, img_size)
                     with track_gpu_memory(device) as mem:
                         lat = benchmark_latency(
-                            model, input_shape, device,
-                            warmup=args.warmup, iterations=args.iterations,
-                            use_amp=args.amp, energy_monitor=energy_monitor,
+                            model,
+                            input_shape,
+                            device,
+                            warmup=args.warmup,
+                            iterations=args.iterations,
+                            use_amp=args.amp,
+                            energy_monitor=energy_monitor,
                         )
 
                     row = {
@@ -517,8 +571,10 @@ def main():
                         f"PeakMem: {mem.get('peak_mb', 0):.1f}MB"
                     )
                     if "energy_per_image_mJ" in row and row["energy_per_image_mJ"]:
-                        print(f"    Energy: {row['energy_per_image_mJ']:.2f} mJ/img | "
-                              f"Avg power: {row['avg_power_W']:.1f}W")
+                        print(
+                            f"    Energy: {row['energy_per_image_mJ']:.2f} mJ/img | "
+                            f"Avg power: {row['avg_power_W']:.1f}W"
+                        )
 
                 except Exception as e:
                     print(f"    ERROR: {e}")
@@ -526,7 +582,7 @@ def main():
                 finally:
                     # Free GPU memory
                     if device.type == "cuda":
-                        if 'model' in dir():
+                        if "model" in dir():
                             del model
                         torch.cuda.empty_cache()
 

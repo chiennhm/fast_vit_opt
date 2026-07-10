@@ -2,7 +2,8 @@
 # For acknowledgement see accompanying ACKNOWLEDGEMENTS file.
 # Copyright (C) 2023 Apple Inc. All rights reserved.
 #
-""" Implementation borrowed from https://github.com/facebookresearch/deit/blob/main/losses.py """
+"""Implementation borrowed from https://github.com/facebookresearch/deit/blob/main/losses.py"""
+
 import torch
 from torch.nn import functional as F
 

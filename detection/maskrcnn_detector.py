@@ -20,7 +20,7 @@
 import torch
 import torch.nn as nn
 from collections import OrderedDict
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 
 import torchvision
 from torchvision.models.detection import MaskRCNN
@@ -33,10 +33,10 @@ from torchvision.ops.feature_pyramid_network import (
 from timm.models import create_model
 import models  # noqa: F401 — registers FastViT variants in timm
 
-
 # ============================================================================
 # FastViT backbone wrapper for torchvision FPN
 # ============================================================================
+
 
 class FastViTBackbone(nn.Module):
     """Wraps FastViT (fork_feat=True) to output an OrderedDict of feature maps.
@@ -75,17 +75,20 @@ class FastViTBackbone(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         features: List[torch.Tensor] = self.body(x)
-        return OrderedDict([
-            ("0", features[0]),
-            ("1", features[1]),
-            ("2", features[2]),
-            ("3", features[3]),
-        ])
+        return OrderedDict(
+            [
+                ("0", features[0]),
+                ("1", features[1]),
+                ("2", features[2]),
+                ("3", features[3]),
+            ]
+        )
 
 
 # ============================================================================
 # Backbone + FPN combined (as expected by torchvision MaskRCNN)
 # ============================================================================
+
 
 class FastViTWithFPN(nn.Module):
     """FastViT backbone fused with a torchvision FeaturePyramidNetwork.
@@ -124,6 +127,7 @@ class FastViTWithFPN(nn.Module):
 # ============================================================================
 # Main Mask R-CNN detector
 # ============================================================================
+
 
 class FastViTMaskRCNN(nn.Module):
     """Mask R-CNN with FastViT-SA12 (ImageNet pretrained) backbone.
@@ -236,14 +240,16 @@ class FastViTMaskRCNN(nn.Module):
         """
         # Modules that belong to added layers (everything except backbone.backbone)
         added_modules = [
-            self.model.backbone.fpn,     # FPN lateral + output convs
-            self.model.rpn,              # RPN head
-            self.model.roi_heads,        # Box head + Mask head
+            self.model.backbone.fpn,  # FPN lateral + output convs
+            self.model.rpn,  # RPN head
+            self.model.roi_heads,  # Box head + Mask head
         ]
         for parent in added_modules:
             for m in parent.modules():
                 if isinstance(m, nn.Conv2d):
-                    nn.init.xavier_uniform_(m.weight, gain=nn.init.calculate_gain("relu"))
+                    nn.init.xavier_uniform_(
+                        m.weight, gain=nn.init.calculate_gain("relu")
+                    )
                     if m.bias is not None:
                         nn.init.zeros_(m.bias)
                 elif isinstance(m, nn.Linear):
@@ -267,11 +273,7 @@ class FastViTMaskRCNN(nn.Module):
         """
         try:
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-            sd = (
-                ckpt.get("state_dict")
-                or ckpt.get("model")
-                or ckpt
-            )
+            sd = ckpt.get("state_dict") or ckpt.get("model") or ckpt
             return any("reparam_conv" in k for k in sd.keys())
         except Exception:
             return False
@@ -300,7 +302,7 @@ class FastViTMaskRCNN(nn.Module):
             state_dict = checkpoint
 
         model_state = backbone_model.state_dict()
-        total_keys  = len(model_state)
+        total_keys = len(model_state)
 
         # Exact match: key name + shape both agree
         exact = {
@@ -312,7 +314,7 @@ class FastViTMaskRCNN(nn.Module):
         missing, unexpected = backbone_model.load_state_dict(exact, strict=False)
 
         # Diagnostic
-        reparam_keys_ckpt  = sum(1 for k in state_dict  if "reparam_conv" in k)
+        reparam_keys_ckpt = sum(1 for k in state_dict if "reparam_conv" in k)
         reparam_keys_model = sum(1 for k in model_state if "reparam_conv" in k)
         print(
             f"[MaskRCNN] Checkpoint: {len(state_dict)} keys "
@@ -391,11 +393,13 @@ class FastViTMaskRCNN(nn.Module):
         results = []
         for pred in raw:
             keep = pred["scores"] >= score_thresh
-            results.append({
-                "boxes":  pred["boxes"][keep],
-                "labels": pred["labels"][keep],
-                "scores": pred["scores"][keep],
-            })
+            results.append(
+                {
+                    "boxes": pred["boxes"][keep],
+                    "labels": pred["labels"][keep],
+                    "scores": pred["scores"][keep],
+                }
+            )
 
         return results
 
@@ -431,8 +435,16 @@ class FastViTMaskRCNN(nn.Module):
                 (head_no_decay if no_decay_key else head_decay).append(param)
 
         return [
-            {"params": backbone_decay,    "lr": base_lr * backbone_lr_scale, "weight_decay": weight_decay},
-            {"params": backbone_no_decay, "lr": base_lr * backbone_lr_scale, "weight_decay": 0.0},
-            {"params": head_decay,        "lr": base_lr,                     "weight_decay": weight_decay},
-            {"params": head_no_decay,     "lr": base_lr,                     "weight_decay": 0.0},
+            {
+                "params": backbone_decay,
+                "lr": base_lr * backbone_lr_scale,
+                "weight_decay": weight_decay,
+            },
+            {
+                "params": backbone_no_decay,
+                "lr": base_lr * backbone_lr_scale,
+                "weight_decay": 0.0,
+            },
+            {"params": head_decay, "lr": base_lr, "weight_decay": weight_decay},
+            {"params": head_no_decay, "lr": base_lr, "weight_decay": 0.0},
         ]

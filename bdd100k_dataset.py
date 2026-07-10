@@ -1,5 +1,5 @@
 #
-# MS-COCO Dataset for Object Detection / Instance Segmentation
+# BDD100K Dataset for Object Detection
 #
 
 import os
@@ -12,182 +12,21 @@ import numpy as np
 import random
 from collections import defaultdict
 
-# pycocotools is optional — used only for RLE mask decoding.
-try:
-    from pycocotools import mask as coco_mask_utils
-
-    HAS_PYCOCOTOOLS = True
-except ImportError:
-    HAS_PYCOCOTOOLS = False
-
-
-COCO_CLASSES = [
-    "person",
-    "bicycle",
+BDD100K_CLASSES = [
+    "pedestrian",
+    "rider",
     "car",
-    "motorcycle",
-    "airplane",
+    "truck",
     "bus",
     "train",
-    "truck",
-    "boat",
+    "motorcycle",
+    "bicycle",
     "traffic light",
-    "fire hydrant",
-    "stop sign",
-    "parking meter",
-    "bench",
-    "bird",
-    "cat",
-    "dog",
-    "horse",
-    "sheep",
-    "cow",
-    "elephant",
-    "bear",
-    "zebra",
-    "giraffe",
-    "backpack",
-    "umbrella",
-    "handbag",
-    "tie",
-    "suitcase",
-    "frisbee",
-    "skis",
-    "snowboard",
-    "sports ball",
-    "kite",
-    "baseball bat",
-    "baseball glove",
-    "skateboard",
-    "surfboard",
-    "tennis racket",
-    "bottle",
-    "wine glass",
-    "cup",
-    "fork",
-    "knife",
-    "spoon",
-    "bowl",
-    "banana",
-    "apple",
-    "sandwich",
-    "orange",
-    "broccoli",
-    "carrot",
-    "hot dog",
-    "pizza",
-    "donut",
-    "cake",
-    "chair",
-    "couch",
-    "potted plant",
-    "bed",
-    "dining table",
-    "toilet",
-    "tv",
-    "laptop",
-    "mouse",
-    "remote",
-    "keyboard",
-    "cell phone",
-    "microwave",
-    "oven",
-    "toaster",
-    "sink",
-    "refrigerator",
-    "book",
-    "clock",
-    "vase",
-    "scissors",
-    "teddy bear",
-    "hair drier",
-    "toothbrush",
+    "traffic sign",
 ]
 
-COCO_CAT_IDS = [
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-    11,
-    13,
-    14,
-    15,
-    16,
-    17,
-    18,
-    19,
-    20,
-    21,
-    22,
-    23,
-    24,
-    25,
-    27,
-    28,
-    31,
-    32,
-    33,
-    34,
-    35,
-    36,
-    37,
-    38,
-    39,
-    40,
-    41,
-    42,
-    43,
-    44,
-    46,
-    47,
-    48,
-    49,
-    50,
-    51,
-    52,
-    53,
-    54,
-    55,
-    56,
-    57,
-    58,
-    59,
-    60,
-    61,
-    62,
-    63,
-    64,
-    65,
-    67,
-    70,
-    72,
-    73,
-    74,
-    75,
-    76,
-    77,
-    78,
-    79,
-    80,
-    81,
-    82,
-    84,
-    85,
-    86,
-    87,
-    88,
-    89,
-    90,
-]
-
-COCO_CAT_TO_IDX = {cat_id: i + 1 for i, cat_id in enumerate(COCO_CAT_IDS)}
+BDD100K_CAT_IDS = list(range(1, 11))
+BDD100K_CAT_TO_IDX = {cat_id: cat_id for cat_id in BDD100K_CAT_IDS}
 
 
 def filter_and_clip_boxes(boxes, img_w, img_h, labels, masks, iscrowd):
@@ -217,10 +56,9 @@ def filter_and_clip_boxes(boxes, img_w, img_h, labels, masks, iscrowd):
     return boxes, labels, masks, iscrowd
 
 
-class COCODetectionDataset(Dataset):
-    """MS-COCO Detection Dataset using pure Python JSON parser.
+class BDD100KDetectionDataset(Dataset):
+    """BDD100K Detection Dataset using pure Python JSON parser.
 
-    Avoids dependency on pycocotools for easy Windows compilation.
     Annotations are converted from COCO JSON to [x1, y1, x2, y2] format.
     """
 
@@ -231,32 +69,25 @@ class COCODetectionDataset(Dataset):
         img_size=512,
         augment=True,
         cache_ram=False,
-        load_masks=True,
     ):
         """
         Args:
-            img_dir: Directory containing COCO images.
-            ann_file: Path to COCO JSON annotations.
+            img_dir: Directory containing BDD100K images.
+            ann_file: Path to BDD100K COCO-formatted JSON annotations.
             img_size: Target image size (square).
             augment: Apply data augmentation.
             cache_ram: Preload dataset to RAM.
-            load_masks: If False, skip segmentation decoding entirely and
-                return empty (0, H, W) mask tensors. Set this to False for
-                bbox-only mAP evaluation (e.g. via pycocotools COCOeval on
-                boxes) to avoid the very large RAM/CPU cost of rasterising
-                full-resolution masks for every annotation, especially on
-                COCO images with hundreds of instances.
         """
         self.img_dir = img_dir
         self.img_size = img_size
         self.augment = augment
-        self.load_masks = load_masks
+        self.load_masks = False
 
         # ImageNet normalization
         self.mean = [0.485, 0.456, 0.406]
         self.std = [0.229, 0.224, 0.225]
 
-        print(f"Loading COCO annotations from {ann_file}...")
+        print(f"Loading BDD100K annotations from {ann_file}...")
         with open(ann_file, "r") as f:
             coco_data = json.load(f)
 
@@ -264,18 +95,17 @@ class COCODetectionDataset(Dataset):
         self.images = {img["id"]: img for img in coco_data["images"]}
         self.img_to_anns = defaultdict(list)
         for ann in coco_data["annotations"]:
-            # Only keep annotation if the category is valid in COCO's 80 classes
-            if ann["category_id"] in COCO_CAT_TO_IDX:
+            if ann["category_id"] in BDD100K_CAT_TO_IDX:
                 self.img_to_anns[ann["image_id"]].append(ann)
 
         self.img_ids = list(self.images.keys())
         print(
-            f"COCO Dataset: {len(self.img_ids)} images, {len(coco_data['annotations'])} annotations loaded"
+            f"BDD100K Dataset: {len(self.img_ids)} images, {len(coco_data['annotations'])} annotations loaded"
         )
 
         self.cache_ram = cache_ram
         if self.cache_ram:
-            print(f"Caching COCO dataset (augment={augment}) to RAM...")
+            print(f"Caching BDD100K dataset (augment={augment}) to RAM...")
             self.cached_images = []
             self.cached_annotations = []
             try:
@@ -283,7 +113,7 @@ class COCODetectionDataset(Dataset):
 
                 pbar = tqdm(
                     self.img_ids,
-                    desc=f"Caching COCO {'train' if augment else 'val'} to RAM",
+                    desc=f"Caching BDD100K {'train' if augment else 'val'} to RAM",
                 )
             except ImportError:
                 pbar = self.img_ids
@@ -304,58 +134,6 @@ class COCODetectionDataset(Dataset):
     def __len__(self):
         return len(self.img_ids)
 
-    def _decode_mask(self, ann, img_h, img_w):
-        """Decode a COCO segmentation annotation into a binary mask (H, W) uint8.
-
-        Supports:
-          - polygon format (list of [x1,y1,x2,y2,...] polygons)
-          - RLE format (requires pycocotools; falls back to bbox mask)
-        """
-        seg = ann.get("segmentation", None)
-
-        if seg is None or (isinstance(seg, list) and len(seg) == 0):
-            # No segmentation — fall back to bounding-box mask
-            bbox = ann["bbox"]
-            mask = np.zeros((img_h, img_w), dtype=np.uint8)
-            x1 = max(0, int(bbox[0]))
-            y1 = max(0, int(bbox[1]))
-            x2 = min(img_w, int(bbox[0] + bbox[2]))
-            y2 = min(img_h, int(bbox[1] + bbox[3]))
-            mask[y1:y2, x1:x2] = 1
-            return mask
-
-        if isinstance(seg, list):
-            # Polygon format — rasterise with PIL ImageDraw (no cv2 dependency)
-            from PIL import ImageDraw
-
-            mask = np.zeros((img_h, img_w), dtype=np.uint8)
-            m_img = Image.fromarray(mask)
-            draw = ImageDraw.Draw(m_img)
-            for poly in seg:
-                pts = list(zip(poly[0::2], poly[1::2]))
-                if len(pts) >= 3:
-                    draw.polygon(pts, fill=1)
-            mask = np.array(m_img, dtype=np.uint8)
-            return mask
-
-        # RLE format (dict with 'counts' and 'size')
-        if isinstance(seg, dict):
-            if HAS_PYCOCOTOOLS:
-                rle = coco_mask_utils.frPyObjects(seg, seg["size"][0], seg["size"][1])
-                return coco_mask_utils.decode(rle).astype(np.uint8)
-            else:
-                # Fallback: bbox mask
-                bbox = ann["bbox"]
-                mask = np.zeros((img_h, img_w), dtype=np.uint8)
-                x1 = max(0, int(bbox[0]))
-                y1 = max(0, int(bbox[1]))
-                x2 = min(img_w, int(bbox[0] + bbox[2]))
-                y2 = min(img_h, int(bbox[1] + bbox[3]))
-                mask[y1:y2, x1:x2] = 1
-                return mask
-
-        return np.zeros((img_h, img_w), dtype=np.uint8)
-
     def _get_annotations(self, img_id, img_h, img_w):
         """Retrieve annotations for a given image ID.
 
@@ -363,7 +141,7 @@ class COCODetectionDataset(Dataset):
             boxes:     list of [x1, y1, x2, y2]
             labels:    list of class indices (1-indexed)
             iscrowd:   list of ints (0 or 1)
-            masks:     list of binary np.ndarray (H, W) uint8
+            masks:     list of empty binary np.ndarray (H, W) uint8 placeholder
         """
         anns = self.img_to_anns[img_id]
         boxes = []
@@ -373,7 +151,7 @@ class COCODetectionDataset(Dataset):
 
         for ann in anns:
             cat_id = ann["category_id"]
-            if cat_id not in COCO_CAT_TO_IDX:
+            if cat_id not in BDD100K_CAT_TO_IDX:
                 continue
 
             # Convert bbox [x, y, w, h] → [x1, y1, x2, y2]
@@ -396,16 +174,10 @@ class COCODetectionDataset(Dataset):
             # Check if valid (width > 0 and height > 0)
             if x2 > x1 and y2 > y1:
                 boxes.append([x1, y1, x2, y2])
-                labels.append(COCO_CAT_TO_IDX[cat_id])
+                labels.append(BDD100K_CAT_TO_IDX[cat_id])
                 iscrowd.append(int(ann.get("iscrowd", 0)))
-                if self.load_masks:
-                    masks.append(self._decode_mask(ann, img_h, img_w))
-                else:
-                    # Bbox-only mode: skip the expensive full-resolution
-                    # polygon/RLE rasterisation entirely.  A 1×1 placeholder
-                    # is used; __getitem__ will build a proper-shaped empty
-                    # tensor from it.
-                    masks.append(np.zeros((1, 1), dtype=np.uint8))
+                # Bdd100k detection only uses bbox, so use a 1x1 placeholder
+                masks.append(np.zeros((1, 1), dtype=np.uint8))
 
         return boxes, labels, iscrowd, masks
 
@@ -422,12 +194,20 @@ class COCODetectionDataset(Dataset):
             img_info = self.images[img_id]
             file_name = img_info["file_name"]
             img_path = os.path.join(self.img_dir, file_name)
+            if not os.path.exists(img_path):
+                # Fallback search
+                base_name = os.path.basename(file_name)
+                for folder in ["train", "val"]:
+                    test_path = os.path.join(self.img_dir, folder, base_name)
+                    if os.path.exists(test_path):
+                        img_path = test_path
+                        break
 
             # Load image
             image = Image.open(img_path).convert("RGB")
             orig_w, orig_h = image.size
 
-            # Get annotations (with segmentation masks)
+            # Get annotations
             boxes, labels, iscrowd, masks = self._get_annotations(
                 img_id, img_h=orig_h, img_w=orig_w
             )
@@ -444,7 +224,6 @@ class COCODetectionDataset(Dataset):
             masks = np.stack(masks, axis=0)  # (N, H, W)
 
         if self.augment:
-            # Training: exclude iscrowd objects (iscrowd == 1)
             easy_mask = iscrowd == 0
             train_boxes = (
                 boxes[easy_mask]
@@ -469,7 +248,6 @@ class COCODetectionDataset(Dataset):
                         image, train_boxes, train_masks, train_labels, train_iscrowd
                     )
                 )
-                # Filter invalid boxes after _augment
                 train_boxes, train_labels, train_masks, train_iscrowd = (
                     filter_and_clip_boxes(
                         train_boxes,
@@ -484,7 +262,6 @@ class COCODetectionDataset(Dataset):
             image, train_boxes, train_masks = self._resize(
                 image, train_boxes, self.img_size, train_masks
             )
-            # Filter invalid boxes after _resize
             new_w, new_h = image.size
             train_boxes, train_labels, train_masks, train_iscrowd = (
                 filter_and_clip_boxes(
@@ -495,7 +272,6 @@ class COCODetectionDataset(Dataset):
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
 
-            # Calculate areas of filtered boxes
             areas = (train_boxes[:, 2] - train_boxes[:, 0]) * (
                 train_boxes[:, 3] - train_boxes[:, 1]
             )
@@ -503,22 +279,13 @@ class COCODetectionDataset(Dataset):
             targets = {
                 "boxes": torch.tensor(train_boxes, dtype=torch.float32),
                 "labels": torch.tensor(train_labels, dtype=torch.int64),
-                # torchvision MaskRCNN expects BoolTensor masks (N, H, W)
                 "masks": torch.tensor(train_masks, dtype=torch.bool),
                 "area": torch.tensor(areas, dtype=torch.float32),
                 "iscrowd": torch.tensor(train_iscrowd, dtype=torch.int64),
             }
         else:
-            # Eval: keep all
-            if self.load_masks:
-                image, boxes, masks = self._resize(image, boxes, self.img_size, masks)
-            else:
-                # Bbox-only eval: don't resize masks to full image
-                # resolution (that's the expensive part). Resize image/boxes
-                # only, then build a tiny placeholder mask tensor.
-                image, boxes = self._resize(image, boxes, self.img_size)
-                masks = np.zeros((len(boxes), 1, 1), dtype=np.uint8)
-            # Filter invalid boxes after _resize
+            image, boxes = self._resize(image, boxes, self.img_size)
+            masks = np.zeros((len(boxes), 1, 1), dtype=np.uint8)
             new_w, new_h = image.size
             boxes, labels, masks, iscrowd = filter_and_clip_boxes(
                 boxes, new_w, new_h, labels, masks, iscrowd
@@ -527,7 +294,6 @@ class COCODetectionDataset(Dataset):
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
 
-            # Calculate areas of filtered boxes
             areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
 
             targets = {
@@ -542,10 +308,8 @@ class COCODetectionDataset(Dataset):
         return image, targets
 
     def _augment(self, image, boxes, masks, labels, iscrowd):
-        """Apply detection-safe augmentations to image, boxes, and masks."""
         w, h = image.size
 
-        # Random horizontal flip
         if random.random() > 0.5:
             image = TF.hflip(image)
             new_boxes = boxes.copy()
@@ -553,9 +317,8 @@ class COCODetectionDataset(Dataset):
             new_boxes[:, 2] = w - boxes[:, 0]
             boxes = new_boxes
             if len(masks) > 0:
-                masks = masks[:, :, ::-1].copy()  # flip each mask horizontally
+                masks = masks[:, :, ::-1].copy()
 
-        # Random color jitter (image only)
         if random.random() > 0.5:
             image = TF.adjust_brightness(image, random.uniform(0.8, 1.2))
         if random.random() > 0.5:
@@ -565,7 +328,6 @@ class COCODetectionDataset(Dataset):
         if random.random() > 0.5:
             image = TF.adjust_hue(image, random.uniform(-0.05, 0.05))
 
-        # Random expand (zoom out)
         if random.random() > 0.5:
             ratio = random.uniform(1.0, 2.0)
             new_w = int(w * ratio)
@@ -592,7 +354,6 @@ class COCODetectionDataset(Dataset):
                 new_masks[:, top : top + h, left : left + w] = masks
                 masks = new_masks
 
-        # Random crop (IoU-aware)
         if random.random() > 0.5:
             image, boxes, masks, labels, iscrowd = self._random_crop(
                 image, boxes, masks, labels, iscrowd
@@ -601,12 +362,11 @@ class COCODetectionDataset(Dataset):
         return image, boxes, masks, labels, iscrowd
 
     def _random_crop(self, image, boxes, masks, labels, iscrowd):
-        """Random crop ensuring at least one box center remains."""
         w, h = image.size
         if len(boxes) == 0:
             return image, boxes, masks, labels, iscrowd
 
-        for _ in range(50):  # Max attempts
+        for _ in range(50):
             scale = random.uniform(0.5, 1.0)
             crop_h = int(h * scale)
             crop_w = int(w * scale)
@@ -615,7 +375,6 @@ class COCODetectionDataset(Dataset):
             right = left + crop_w
             bottom = top + crop_h
 
-            # Check if any box center is inside crop
             cx = (boxes[:, 0] + boxes[:, 2]) / 2
             cy = (boxes[:, 1] + boxes[:, 3]) / 2
             keep = (cx >= left) & (cx <= right) & (cy >= top) & (cy <= bottom)
@@ -623,14 +382,12 @@ class COCODetectionDataset(Dataset):
             if not keep.any():
                 continue
 
-            # Adjust boxes
             new_boxes = boxes[keep].copy()
             new_boxes[:, 0] = np.clip(new_boxes[:, 0] - left, 0, crop_w)
             new_boxes[:, 1] = np.clip(new_boxes[:, 1] - top, 0, crop_h)
             new_boxes[:, 2] = np.clip(new_boxes[:, 2] - left, 0, crop_w)
             new_boxes[:, 3] = np.clip(new_boxes[:, 3] - top, 0, crop_h)
 
-            # Crop masks
             new_masks = (
                 masks[keep, top:bottom, left:right].copy()
                 if len(masks) > 0
@@ -640,7 +397,6 @@ class COCODetectionDataset(Dataset):
             new_labels = labels[keep]
             new_iscrowd = iscrowd[keep]
 
-            # Filter tiny boxes
             valid = ((new_boxes[:, 2] - new_boxes[:, 0]) > 5) & (
                 (new_boxes[:, 3] - new_boxes[:, 1]) > 5
             )
@@ -657,20 +413,12 @@ class COCODetectionDataset(Dataset):
         return image, boxes, masks, labels, iscrowd
 
     def _resize(self, image, boxes, target_size, masks=None, max_size=1333):
-        """Resize image preserving aspect ratio.
-
-        Shortest side is scaled to *target_size* and the longest side is
-        capped at *max_size* (default 1333), following the standard
-        detection convention (800 / 1333).
-        """
         orig_w, orig_h = image.size
 
-        # Compute scale so that the shortest side == target_size
         min_side = min(orig_w, orig_h)
         max_side = max(orig_w, orig_h)
         scale = target_size / min_side
 
-        # Cap so that the longest side does not exceed max_size
         if scale * max_side > max_size:
             scale = max_size / max_side
 
@@ -690,7 +438,6 @@ class COCODetectionDataset(Dataset):
 
         if masks is not None:
             if len(masks) > 0:
-                # Resize each mask using nearest-neighbour to preserve binary values
                 resized = np.zeros((masks.shape[0], new_h, new_w), dtype=masks.dtype)
                 for i, m in enumerate(masks):
                     pil_m = Image.fromarray(m).resize((new_w, new_h), Image.NEAREST)
@@ -704,13 +451,7 @@ class COCODetectionDataset(Dataset):
         return image, boxes
 
 
-def coco_collate(batch):
-    """Custom collate function for COCO detection.
-
-    Handles variable number of boxes per image and variable image sizes
-    (aspect-ratio preserving resize produces different-sized tensors).
-    Images are zero-padded to the nearest multiple of 32.
-    """
+def bdd100k_collate(batch):
     import torch.nn.functional as F
 
     images = []
@@ -720,7 +461,6 @@ def coco_collate(batch):
         images.append(img)
         targets.append(target)
 
-    # Pad images to same size (multiple of 32) within the batch
     max_h = max(img.shape[1] for img in images)
     max_w = max(img.shape[2] for img in images)
     max_h = ((max_h + 31) // 32) * 32
@@ -738,50 +478,30 @@ def coco_collate(batch):
     return images, targets
 
 
-def build_coco_datasets(
-    data_dir="./data/coco",
+def build_bdd100k_datasets(
+    data_dir="./data/bdd100k",
     img_size=512,
     train_img_dir=None,
     train_ann_file=None,
     val_img_dir=None,
     val_ann_file=None,
     cache_ram=False,
-    val_load_masks=False,
 ):
-    """Build train and validation COCO datasets.
-
-    Args:
-        data_dir: Root directory for COCO dataset.
-        img_size: Input image size.
-        train_img_dir: Custom path to train images.
-        train_ann_file: Custom path to train annotations.
-        val_img_dir: Custom path to val images.
-        val_ann_file: Custom path to val annotations.
-        cache_ram: Preload dataset to RAM.
-        val_load_masks: If False (default), the validation dataset skips
-            full-resolution mask decoding entirely. The eval/mAP path in
-            object_detection.py only uses boxes/labels/iscrowd for
-            pycocotools bbox mAP, so decoding masks for every validation
-            annotation is pure overhead — and on COCO images with many
-            instances, the per-image RAM/CPU cost can spike badly. Set to
-            True only if you actually need segmentation masks out of the
-            val dataloader (e.g. for visualizing or scoring segm mAP).
-
-    Returns:
-        train_dataset, val_dataset
-    """
+    """Build train and validation BDD100K datasets."""
     if train_img_dir is None:
-        train_img_dir = os.path.join(data_dir, "train2017")
+        train_img_dir = os.path.join(data_dir, "images", "100k", "train")
     if train_ann_file is None:
         train_ann_file = os.path.join(
-            data_dir, "annotations", "instances_train2017.json"
+            data_dir, "annotations", "bdd100k_det_train_coco.json"
         )
     if val_img_dir is None:
-        val_img_dir = os.path.join(data_dir, "val2017")
+        val_img_dir = os.path.join(data_dir, "images", "100k", "val")
     if val_ann_file is None:
-        val_ann_file = os.path.join(data_dir, "annotations", "instances_val2017.json")
+        val_ann_file = os.path.join(
+            data_dir, "annotations", "bdd100k_det_val_coco.json"
+        )
 
-    train_dataset = COCODetectionDataset(
+    train_dataset = BDD100KDetectionDataset(
         img_dir=train_img_dir,
         ann_file=train_ann_file,
         img_size=img_size,
@@ -789,13 +509,12 @@ def build_coco_datasets(
         cache_ram=cache_ram,
     )
 
-    val_dataset = COCODetectionDataset(
+    val_dataset = BDD100KDetectionDataset(
         img_dir=val_img_dir,
         ann_file=val_ann_file,
         img_size=img_size,
         augment=False,
         cache_ram=cache_ram,
-        load_masks=val_load_masks,
     )
 
     return train_dataset, val_dataset

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 try:
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
+
     HAS_PYCOCOTOOLS = True
 except ImportError:
     HAS_PYCOCOTOOLS = False
@@ -52,11 +53,13 @@ def _build_coco_gt(ground_truths, num_classes, class_names=None):
 
     for img_idx, gt in enumerate(ground_truths):
         # Register each image (width/height not used by COCOeval for bbox)
-        images.append({
-            "id": img_idx,
-            "width": 0,
-            "height": 0,
-        })
+        images.append(
+            {
+                "id": img_idx,
+                "width": 0,
+                "height": 0,
+            }
+        )
 
         gt_boxes = gt["boxes"]
         gt_labels = gt["labels"]
@@ -92,14 +95,16 @@ def _build_coco_gt(ground_truths, num_classes, class_names=None):
             else:
                 is_crowd = 0
 
-            annotations.append({
-                "id": ann_id,
-                "image_id": img_idx,
-                "category_id": int(gt_labels[i]),
-                "bbox": [float(x1), float(y1), w, h],  # COCO format: [x, y, w, h]
-                "area": area,
-                "iscrowd": is_crowd,
-            })
+            annotations.append(
+                {
+                    "id": ann_id,
+                    "image_id": img_idx,
+                    "category_id": int(gt_labels[i]),
+                    "bbox": [float(x1), float(y1), w, h],  # COCO format: [x, y, w, h]
+                    "area": area,
+                    "iscrowd": is_crowd,
+                }
+            )
             ann_id += 1
 
     # Categories
@@ -141,12 +146,14 @@ def _build_coco_dt(predictions):
             x1, y1, x2, y2 = pred_boxes[i]
             w = float(x2 - x1)
             h = float(y2 - y1)
-            results.append({
-                "image_id": img_idx,
-                "category_id": int(pred_labels[i]),
-                "bbox": [float(x1), float(y1), w, h],
-                "score": float(pred_scores[i]),
-            })
+            results.append(
+                {
+                    "image_id": img_idx,
+                    "category_id": int(pred_labels[i]),
+                    "bbox": [float(x1), float(y1), w, h],
+                    "score": float(pred_scores[i]),
+                }
+            )
 
     return results
 
@@ -192,9 +199,13 @@ def evaluate_coco(
             "Install with: pip install pycocotools"
         )
         from .eval_voc import evaluate_voc
+
         return evaluate_voc(
-            predictions, ground_truths, num_classes=num_classes,
-            iou_threshold=iou_threshold, class_names=class_names,
+            predictions,
+            ground_truths,
+            num_classes=num_classes,
+            iou_threshold=iou_threshold,
+            class_names=class_names,
         )
 
     assert len(predictions) == len(ground_truths)
@@ -214,9 +225,7 @@ def evaluate_coco(
     # Guard: if there are no GT annotations, return zeros
     if len(gt_dict["annotations"]) == 0:
         logger.warning("No ground truth annotations — returning zero mAP.")
-        ap_per_class = {
-            class_names[i]: None for i in range(num_classes)
-        }
+        ap_per_class = {class_names[i]: None for i in range(num_classes)}
         return {"mAP": 0.0, "ap_per_class": ap_per_class}
 
     # Suppress pycocotools print spam
@@ -233,10 +242,7 @@ def evaluate_coco(
         ap_per_class = {
             class_names[i]: 0.0
             for i in range(num_classes)
-            if any(
-                a["category_id"] == i + 1
-                for a in gt_dict["annotations"]
-            )
+            if any(a["category_id"] == i + 1 for a in gt_dict["annotations"])
         }
         # Fill classes with no GT as None
         for i in range(num_classes):
@@ -260,7 +266,7 @@ def evaluate_coco(
     #   (T, R, K, A, M) = (nThresholds, nRecallThresholds, nCategories, nAreas, nMaxDets)
     # We want per-class AP at primary threshold, area=all, maxDet=last
     precision = coco_eval.eval["precision"]  # (T, R, K, A, M)
-    cat_ids = coco_eval.params.catIds        # list of category ids evaluated
+    cat_ids = coco_eval.params.catIds  # list of category ids evaluated
 
     ap_per_class = {}
     primary_aps = []  # for computing primary mAP

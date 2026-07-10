@@ -9,7 +9,7 @@
 #
 
 from dataclasses import dataclass, field
-from typing import Tuple, List, Optional
+from typing import Tuple, Optional
 
 
 # ============================================================================

@@ -18,7 +18,6 @@
 
 import argparse
 import os
-import sys
 import copy
 import time
 import json
@@ -38,32 +37,33 @@ import numpy as np
 # FX-graph-mode quantization (automatic fusion)
 try:
     from torch.ao.quantization import quantize_fx
+
     HAS_FX = True
 except ImportError:
     HAS_FX = False
 
-import models  # registers FastViT variants
+import models  # noqa: F401 # registers FastViT variants
 from timm.models import create_model
 
 try:
     from models.modules.mobileone import reparameterize_model
+
     HAS_REPARAM = True
 except ImportError:
     HAS_REPARAM = False
-
-try:
-    from fvcore.nn import FlopCountAnalysis, parameter_count
-    HAS_FVCORE = True
-except ImportError:
-    HAS_FVCORE = False
 
 
 # ============================================================================
 # Constants
 # ============================================================================
 ALL_VARIANTS = [
-    "fastvit_t8", "fastvit_t12", "fastvit_s12",
-    "fastvit_sa12", "fastvit_sa24", "fastvit_sa36", "fastvit_ma36",
+    "fastvit_t8",
+    "fastvit_t12",
+    "fastvit_s12",
+    "fastvit_sa12",
+    "fastvit_sa24",
+    "fastvit_sa36",
+    "fastvit_ma36",
 ]
 
 
@@ -87,10 +87,13 @@ def build_model(variant, mode, checkpoint=None, reparam=True, num_classes=20):
     """
     if mode == "detection":
         from detection.fastvit_detector import FastViTDetector
+
         model = FastViTDetector(model_name=variant, num_classes=num_classes)
     else:
         # If backbone mode, default to 1000 unless custom num_classes is passed
-        model = create_model(variant, num_classes=num_classes if num_classes != 20 else 1000)
+        model = create_model(
+            variant, num_classes=num_classes if num_classes != 20 else 1000
+        )
 
     # Load checkpoint if provided
     if checkpoint is not None:
@@ -202,15 +205,17 @@ class CalibrationDataLoader:
         try:
             from torchvision import transforms, datasets
 
-            transform = transforms.Compose([
-                transforms.Resize(int(self.img_size / 0.875)),
-                transforms.CenterCrop(self.img_size),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225],
-                ),
-            ])
+            transform = transforms.Compose(
+                [
+                    transforms.Resize(int(self.img_size / 0.875)),
+                    transforms.CenterCrop(self.img_size),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225],
+                    ),
+                ]
+            )
 
             dataset = datasets.ImageFolder(data_dir, transform=transform)
             # Subsample for calibration
@@ -221,7 +226,10 @@ class CalibrationDataLoader:
             )
             subset = torch.utils.data.Subset(dataset, indices)
             self._loader = torch.utils.data.DataLoader(
-                subset, batch_size=self.batch_size, shuffle=False, num_workers=2,
+                subset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=2,
             )
             print(f"  [✓] Calibration: {len(subset)} real images from {data_dir}")
         except Exception as e:
@@ -247,8 +255,9 @@ class CalibrationDataLoader:
         return (self.num_samples + self.batch_size - 1) // self.batch_size
 
 
-def quantize_static(model, calib_data_dir=None, img_size=256,
-                     num_calib=200, backend="x86"):
+def quantize_static(
+    model, calib_data_dir=None, img_size=256, num_calib=200, backend="x86"
+):
     """Apply static post-training quantization with calibration.
 
     Quantizes both weights AND activations to INT8, giving the best
@@ -308,8 +317,8 @@ def quantize_static(model, calib_data_dir=None, img_size=256,
                 example_inputs=(example_input,),
             )
             print(f"  [✓] FX auto-fusion + prepare (backend={engine})")
-            print(f"      Activation observer : HistogramObserver")
-            print(f"      Weight observer     : PerChannelMinMaxObserver")
+            print("      Activation observer : HistogramObserver")
+            print("      Weight observer     : PerChannelMinMaxObserver")
 
             # Calibration
             print(f"  [→] Running calibration with {num_calib} samples...")
@@ -344,8 +353,8 @@ def quantize_static(model, calib_data_dir=None, img_size=256,
     # Apply custom qconfig (HistogramObserver + PerChannelMinMax)
     model_prepared.qconfig = custom_qconfig
     print(f"  [✓] Eager-mode prepare (backend={engine})")
-    print(f"      Activation observer : HistogramObserver")
-    print(f"      Weight observer     : PerChannelMinMaxObserver")
+    print("      Activation observer : HistogramObserver")
+    print("      Weight observer     : PerChannelMinMaxObserver")
 
     quant.prepare(model_prepared, inplace=True)
 
@@ -370,6 +379,7 @@ def quantize_static(model, calib_data_dir=None, img_size=256,
 def get_model_size_mb(model):
     """Get model size in MB by saving to a temporary buffer."""
     import io
+
     buffer = io.BytesIO()
     torch.save(model.state_dict(), buffer)
     size_mb = buffer.tell() / 1e6
@@ -443,18 +453,32 @@ def print_comparison(fp32_stats, quant_stats, fp32_size, quant_size):
     print("-" * 78)
 
     # Latency
-    speedup = fp32_stats["mean_ms"] / quant_stats["mean_ms"] if quant_stats["mean_ms"] > 0 else 0
-    print(f"  {'Latency (ms)':24s} {fp32_stats['mean_ms']:>14.2f}  {quant_stats['mean_ms']:>14.2f}  {speedup:>13.2f}x")
-    print(f"  {'Latency std (ms)':24s} {fp32_stats['std_ms']:>14.2f}  {quant_stats['std_ms']:>14.2f}")
-    print(f"  {'P95 Latency (ms)':24s} {fp32_stats['p95_ms']:>14.2f}  {quant_stats['p95_ms']:>14.2f}")
+    speedup = (
+        fp32_stats["mean_ms"] / quant_stats["mean_ms"]
+        if quant_stats["mean_ms"] > 0
+        else 0
+    )
+    print(
+        f"  {'Latency (ms)':24s} {fp32_stats['mean_ms']:>14.2f}  {quant_stats['mean_ms']:>14.2f}  {speedup:>13.2f}x"
+    )
+    print(
+        f"  {'Latency std (ms)':24s} {fp32_stats['std_ms']:>14.2f}  {quant_stats['std_ms']:>14.2f}"
+    )
+    print(
+        f"  {'P95 Latency (ms)':24s} {fp32_stats['p95_ms']:>14.2f}  {quant_stats['p95_ms']:>14.2f}"
+    )
 
     # Throughput
-    print(f"  {'Throughput (img/s)':24s} {fp32_stats['throughput_img_s']:>14.1f}  {quant_stats['throughput_img_s']:>14.1f}")
+    print(
+        f"  {'Throughput (img/s)':24s} {fp32_stats['throughput_img_s']:>14.1f}  {quant_stats['throughput_img_s']:>14.1f}"
+    )
 
     # Model size
-    compression = fp32_size / quant_size if quant_size > 0 else 0
+
     reduction_pct = (1 - quant_size / fp32_size) * 100 if fp32_size > 0 else 0
-    print(f"  {'Model size (MB)':24s} {fp32_size:>14.2f}  {quant_size:>14.2f}  {reduction_pct:>12.1f}%↓")
+    print(
+        f"  {'Model size (MB)':24s} {fp32_size:>14.2f}  {quant_size:>14.2f}  {reduction_pct:>12.1f}%↓"
+    )
 
     print("=" * 78)
 
@@ -516,74 +540,103 @@ Examples:
     )
 
     parser.add_argument(
-        "--model", type=str, default="fastvit_sa12",
+        "--model",
+        type=str,
+        default="fastvit_sa12",
         help=f"FastViT variant. Choices: {ALL_VARIANTS}",
     )
     parser.add_argument(
-        "--mode", type=str, default="backbone",
+        "--mode",
+        type=str,
+        default="backbone",
         choices=["backbone", "detection"],
         help="Model mode: backbone (classification) or detection",
     )
     parser.add_argument(
-        "--method", type=str, default="dynamic",
+        "--method",
+        type=str,
+        default="dynamic",
         choices=["dynamic", "static"],
         help="Quantization method: dynamic or static (PTQ)",
     )
     parser.add_argument(
-        "--checkpoint", type=str, default=None,
+        "--checkpoint",
+        type=str,
+        default=None,
         help="Path to .pth checkpoint to load weights from",
     )
     parser.add_argument(
-        "--num-classes", type=int, default=20,
+        "--num-classes",
+        type=int,
+        default=20,
         help="Number of classes (for detection: VOC is 20, COCO is 80; default: 20)",
     )
     parser.add_argument(
-        "--img-size", type=int, default=256,
+        "--img-size",
+        type=int,
+        default=256,
         help="Input image size (default: 256)",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=1,
+        "--batch-size",
+        type=int,
+        default=1,
         help="Batch size for benchmarking (default: 1)",
     )
     parser.add_argument(
-        "--no-reparam", action="store_true",
+        "--no-reparam",
+        action="store_true",
         help="Skip reparameterization before quantization",
     )
 
     # Static quantization options
     parser.add_argument(
-        "--calib-data", type=str, default=None,
+        "--calib-data",
+        type=str,
+        default=None,
         help="Path to calibration images (ImageFolder layout) for static quant",
     )
     parser.add_argument(
-        "--num-calib", type=int, default=200,
+        "--num-calib",
+        type=int,
+        default=200,
         help="Number of calibration samples for static quant (default: 200)",
     )
     parser.add_argument(
-        "--backend", type=str, default="x86",
+        "--backend",
+        type=str,
+        default="x86",
         choices=["x86", "fbgemm", "qnnpack"],
         help="Quantization backend (default: x86)",
     )
 
     # Output options
     parser.add_argument(
-        "--output-dir", type=str, default="./output/quantized",
+        "--output-dir",
+        type=str,
+        default="./output/quantized",
         help="Output directory for quantized models",
     )
     parser.add_argument(
-        "--export", action="store_true",
+        "--export",
+        action="store_true",
         help="Export quantized model as TorchScript",
     )
     parser.add_argument(
-        "--benchmark", action="store_true",
+        "--benchmark",
+        action="store_true",
         help="Benchmark FP32 vs quantized model",
     )
     parser.add_argument(
-        "--warmup", type=int, default=30,
+        "--warmup",
+        type=int,
+        default=30,
         help="Warmup iterations for benchmarking (default: 30)",
     )
     parser.add_argument(
-        "--iterations", type=int, default=100,
+        "--iterations",
+        type=int,
+        default=100,
         help="Timed iterations for benchmarking (default: 100)",
     )
 
@@ -647,28 +700,36 @@ Examples:
 
     quant_size = get_model_size_mb(quant_model)
     compression = fp32_size / quant_size if quant_size > 0 else 0
-    print(f"  Quantized model size: {quant_size:.2f} MB ({compression:.1f}x compression)")
+    print(
+        f"  Quantized model size: {quant_size:.2f} MB ({compression:.1f}x compression)"
+    )
 
     # ----------------------------------------------------------------
     # Benchmark
     # ----------------------------------------------------------------
     if args.benchmark:
-        print(f"\n[3/4] Benchmarking (batch_size={args.batch_size}, "
-              f"warmup={args.warmup}, iters={args.iterations})...")
+        print(
+            f"\n[3/4] Benchmarking (batch_size={args.batch_size}, "
+            f"warmup={args.warmup}, iters={args.iterations})..."
+        )
 
         input_shape = (args.batch_size, 3, args.img_size, args.img_size)
 
         print("  → FP32 model...")
         fp32_stats = benchmark_inference(
-            fp32_model, input_shape,
-            warmup=args.warmup, iterations=args.iterations,
+            fp32_model,
+            input_shape,
+            warmup=args.warmup,
+            iterations=args.iterations,
             label="FP32",
         )
 
         print("  → Quantized model...")
         quant_stats = benchmark_inference(
-            quant_model, input_shape,
-            warmup=args.warmup, iterations=args.iterations,
+            quant_model,
+            input_shape,
+            warmup=args.warmup,
+            iterations=args.iterations,
             label=f"INT8-{args.method}",
         )
 
@@ -680,27 +741,30 @@ Examples:
     # ----------------------------------------------------------------
     # Save / Export
     # ----------------------------------------------------------------
-    print(f"\n[4/4] Saving quantized model...")
+    print("\n[4/4] Saving quantized model...")
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Save PyTorch model
     model_name = f"{args.model}_{args.mode}_{args.method}_int8"
     pth_path = os.path.join(args.output_dir, f"{model_name}.pth")
-    torch.save({
-        "model_state_dict": quant_model.state_dict(),
-        "config": {
-            "variant": args.model,
-            "mode": args.mode,
-            "method": args.method,
-            "img_size": args.img_size,
-            "backend": args.backend,
-            "fp32_size_mb": fp32_size,
-            "quant_size_mb": quant_size,
-            "total_params": total_params,
-            "timestamp": timestamp,
+    torch.save(
+        {
+            "model_state_dict": quant_model.state_dict(),
+            "config": {
+                "variant": args.model,
+                "mode": args.mode,
+                "method": args.method,
+                "img_size": args.img_size,
+                "backend": args.backend,
+                "fp32_size_mb": fp32_size,
+                "quant_size_mb": quant_size,
+                "total_params": total_params,
+                "timestamp": timestamp,
+            },
         },
-    }, pth_path)
+        pth_path,
+    )
     print(f"  [✓] Saved: {pth_path}")
 
     # Export TorchScript
@@ -722,9 +786,11 @@ Examples:
             },
             "fp32": {**fp32_stats, "size_mb": fp32_size},
             "quantized": {**quant_stats, "size_mb": quant_size},
-            "speedup": round(
-                fp32_stats["mean_ms"] / quant_stats["mean_ms"], 3
-            ) if quant_stats["mean_ms"] > 0 else 0,
+            "speedup": (
+                round(fp32_stats["mean_ms"] / quant_stats["mean_ms"], 3)
+                if quant_stats["mean_ms"] > 0
+                else 0
+            ),
             "compression": round(compression, 2),
         }
         report_path = os.path.join(args.output_dir, f"{model_name}_report.json")
@@ -740,9 +806,15 @@ Examples:
     print(f"  FP32  → {fp32_size:.2f} MB")
     print(f"  INT8  → {quant_size:.2f} MB  ({compression:.1f}x smaller)")
     if fp32_stats and quant_stats:
-        speedup = fp32_stats["mean_ms"] / quant_stats["mean_ms"] if quant_stats["mean_ms"] > 0 else 0
-        print(f"  Speedup: {speedup:.2f}x  "
-              f"({fp32_stats['mean_ms']:.1f}ms → {quant_stats['mean_ms']:.1f}ms)")
+        speedup = (
+            fp32_stats["mean_ms"] / quant_stats["mean_ms"]
+            if quant_stats["mean_ms"] > 0
+            else 0
+        )
+        print(
+            f"  Speedup: {speedup:.2f}x  "
+            f"({fp32_stats['mean_ms']:.1f}ms → {quant_stats['mean_ms']:.1f}ms)"
+        )
     print("=" * 70)
 
 

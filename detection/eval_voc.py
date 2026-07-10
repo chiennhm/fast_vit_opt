@@ -53,8 +53,9 @@ def _compute_iou_batch(pred_box, gt_boxes_array):
 
     inter = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
     area1 = (pred_box[2] - pred_box[0]) * (pred_box[3] - pred_box[1])
-    area2 = (gt_boxes_array[:, 2] - gt_boxes_array[:, 0]) * \
-            (gt_boxes_array[:, 3] - gt_boxes_array[:, 1])
+    area2 = (gt_boxes_array[:, 2] - gt_boxes_array[:, 0]) * (
+        gt_boxes_array[:, 3] - gt_boxes_array[:, 1]
+    )
 
     return inter / (area1 + area2 - inter + 1e-7)
 
@@ -154,11 +155,11 @@ def evaluate_voc(
         for img_idx, box, diff in gts:
             gt_by_image[img_idx]["boxes"].append(box)
             gt_by_image[img_idx]["difficults"].append(diff)
-        
+
         gt_lookup = {}
         for img_idx, data in gt_by_image.items():
             gt_lookup[img_idx] = {
-                "boxes": np.array(data["boxes"]),           # (G, 4)
+                "boxes": np.array(data["boxes"]),  # (G, 4)
                 "difficults": np.array(data["difficults"]),  # (G,)
             }
         processed_gts[cls_id] = gt_lookup
@@ -167,7 +168,11 @@ def evaluate_voc(
     ap_per_threshold = {}
     for thresh in thresholds:
         aps = _evaluate_at_threshold(
-            processed_preds, processed_gts, n_gt_per_class, num_classes, thresh,
+            processed_preds,
+            processed_gts,
+            n_gt_per_class,
+            num_classes,
+            thresh,
         )
         ap_per_threshold[thresh] = aps
 
@@ -177,7 +182,8 @@ def evaluate_voc(
 
     # Compute mAP: only over classes that have GT
     valid_aps = [
-        ap for cls_id, ap in primary_aps.items()
+        ap
+        for cls_id, ap in primary_aps.items()
         if ap is not None  # None = no GT for this class
     ]
     mAP = float(np.mean(valid_aps)) if valid_aps else 0.0
@@ -188,7 +194,11 @@ def evaluate_voc(
 
     ap_per_class = {}
     for cls_id in range(1, num_classes + 1):
-        name = class_names[cls_id - 1] if cls_id - 1 < len(class_names) else f"class_{cls_id}"
+        name = (
+            class_names[cls_id - 1]
+            if cls_id - 1 < len(class_names)
+            else f"class_{cls_id}"
+        )
         ap_per_class[name] = primary_aps.get(cls_id)  # None if no GT
 
     result = {
@@ -208,7 +218,9 @@ def evaluate_voc(
     return result
 
 
-def _evaluate_at_threshold(processed_preds, processed_gts, n_gt_per_class, num_classes, iou_threshold):
+def _evaluate_at_threshold(
+    processed_preds, processed_gts, n_gt_per_class, num_classes, iou_threshold
+):
     """Compute per-class AP at a single IoU threshold.
 
     Returns:
@@ -252,7 +264,7 @@ def _evaluate_at_threshold(processed_preds, processed_gts, n_gt_per_class, num_c
                 if img_gt["difficults"][best_gt_idx]:
                     # Match with difficult GT: neither TP nor FP (VOC protocol)
                     continue
-                
+
                 matched = matched_lookup[img_idx]
                 if not matched[best_gt_idx]:
                     tp[pred_idx] = 1
