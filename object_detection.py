@@ -60,7 +60,7 @@ import numpy as np
 from detection.fastvit_detector import FastViTDetector
 from detection.maskrcnn_detector import FastViTMaskRCNN
 from detection.losses import DetectionLoss
-from detection.eval_coco import print_eval_results
+from detection.eval_coco import print_eval_results, evaluate_coco
 from detection.visualize import save_detection_results, VOC_CLASSES
 from voc_dataset import build_voc_datasets, detection_collate
 from coco_dataset import build_coco_datasets, coco_collate, COCO_CLASSES
@@ -264,6 +264,12 @@ def parse_args():
     parser.add_argument(
         "--focal-gamma", type=float, default=2.0, help="Focal loss gamma (default: 2.0)"
     )
+    parser.add_argument(
+        "--reg-max",
+        type=int,
+        default=None,
+        help="Maximum value of regression bins for Distribution Focal Loss (default: None, disabled)",
+    )
 
     # AMP
     parser.add_argument(
@@ -275,6 +281,11 @@ def parse_args():
     parser.add_argument("--no-amp", action="store_true", help="Disable AMP")
 
     # Evaluation
+    parser.add_argument(
+        "--no-eval",
+        action="store_true",
+        help="Disable evaluation during training",
+    )
     parser.add_argument(
         "--eval-interval",
         type=int,
@@ -927,19 +938,28 @@ def evaluate(model, dataloader, device, args, save_vis=False, output_dir=None):
         json.dump(serialized_predictions, f, indent=2)
     logger.info(f"Predictions successfully saved to {json_path}")
 
-    # Determine class names for returning dummy results
+    # Determine parameters for actual mAP computation
     if args.dataset == "coco":
+        num_classes = 80
         class_names = COCO_CLASSES
+        iou_threshold = np.linspace(0.5, 0.95, 10).tolist()
     elif args.dataset == "bdd100k":
+        num_classes = 10
         class_names = BDD100K_CLASSES
+        iou_threshold = 0.5
     else:
+        num_classes = 20
         class_names = VOC_CLASSES
+        iou_threshold = 0.5
 
-    results = {
-        "map": 0.0,
-        "ap": [0.0] * len(class_names),
-        "class_ap": {name: 0.0 for name in class_names},
-    }
+    # Compute actual mAP using evaluate_coco (falls back to evaluate_voc if pycocotools is missing)
+    results = evaluate_coco(
+        all_predictions,
+        all_ground_truths,
+        num_classes=num_classes,
+        iou_threshold=iou_threshold,
+        class_names=class_names,
+    )
 
     # Free the large prediction/gt lists after mAP is computed
     del all_predictions, all_ground_truths
@@ -1123,6 +1143,7 @@ def main():
             num_classes=num_classes,
             fpn_channels=args.fpn_channels,
             pretrained_backbone=args.pretrained_backbone,
+            reg_max=args.reg_max,
         )
 
     model = model.to(device)
@@ -1148,6 +1169,7 @@ def main():
             num_classes=num_classes,
             alpha=args.focal_alpha,
             gamma=args.focal_gamma,
+            reg_max=args.reg_max if args.reg_max is not None else 16,
         )
 
     # Build parameter groups (backbone vs head, with/without weight-decay)
@@ -1304,8 +1326,9 @@ def main():
 
         # Evaluate
         is_eval_epoch = (
-            epoch + 1
-        ) % args.eval_interval == 0 or epoch == args.epochs - 1
+            not args.no_eval
+            and ((epoch + 1) % args.eval_interval == 0 or epoch == args.epochs - 1)
+        )
         current_map = None
         is_best = False
         if is_eval_epoch:
@@ -1343,7 +1366,7 @@ def main():
                         epoch_log[f"eval/AP/{cls_name}"] = ap
             wandb.log(epoch_log, step=global_step)
 
-        if is_eval_epoch:
+        if is_eval_epoch or epoch == args.epochs - 1:
             # Save checkpoint
             checkpoint_state = {
                 "epoch": epoch,

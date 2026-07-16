@@ -110,7 +110,7 @@ class ModelConfig:
     """Number of conv layers in cls/reg heads."""
 
     # --- Anchor configuration ---
-    anchor_sizes: Tuple[int, ...] = (32, 64, 128, 256)
+    anchor_sizes: Tuple[int, ...] = (16, 32, 64, 128, 256)
     """Base anchor size per FPN level (one per level)."""
 
     anchor_ratios: Tuple[float, ...] = (0.5, 1.0, 2.0)
@@ -273,7 +273,7 @@ class AnchorKMeansConfig:
     num_anchors: int = 12
     """Total number of anchor clusters."""
 
-    num_levels: int = 4
+    num_levels: int = 5
     """Number of FPN levels to distribute anchors across."""
 
     distance: str = "iou"

@@ -274,8 +274,161 @@ def decode_boxes(deltas, anchors, weights=BOX_WEIGHTS, bbox_clip=4.135):
     return torch.stack([x1, y1, x2, y2], dim=1)
 
 
+class QualityFocalLoss(nn.Module):
+    """Quality Focal Loss (QFL) from Generalized Focal Loss (GFL).
+
+    Reference: Li et al. "Generalized Focal Loss: Learning Qualified and Distributed Bounding Boxes
+    for Dense Object Detection" (NeurIPS 2020)
+    """
+
+    def __init__(self, alpha=0.25, beta=2.0, reduction="sum"):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.reduction = reduction
+
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: (N, num_classes) predicted logits
+            target: (N,) class indices, 0 for background, 1..C for object classes, -1 for ignore
+        """
+        num_classes = pred.shape[1]
+        target_one_hot = torch.zeros_like(pred)
+        
+        pos_mask = target > 0
+        pos_targets = (target[pos_mask] - 1).long()
+        target_one_hot[pos_mask] = F.one_hot(pos_targets, num_classes).to(target_one_hot.dtype)
+        
+        valid_mask = target >= 0
+        
+        pred_sigmoid = torch.sigmoid(pred)
+        # scale factor: |target - pred|^beta
+        scale_factor = torch.abs(target_one_hot - pred_sigmoid) ** self.beta
+        
+        # Standard BCE loss
+        bce_loss = F.binary_cross_entropy_with_logits(pred, target_one_hot, reduction="none")
+        
+        # Alpha balancing factor
+        if self.alpha >= 0:
+            alpha_t = self.alpha * target_one_hot + (1 - self.alpha) * (1 - target_one_hot)
+            loss = alpha_t * scale_factor * bce_loss
+        else:
+            loss = scale_factor * bce_loss
+            
+        # Ignore samples with target == -1
+        loss = loss * valid_mask.unsqueeze(1).float()
+        
+        if self.reduction == "sum":
+            return loss.sum()
+        elif self.reduction == "mean":
+            return loss.mean() if loss.numel() > 0 else loss.sum()
+        return loss
+
+
+class CIoULoss(nn.Module):
+    """Complete IoU (CIoU) Loss for bounding box regression."""
+
+    def __init__(self, reduction="sum", eps=1e-7):
+        super().__init__()
+        self.reduction = reduction
+        self.eps = eps
+
+    def forward(self, pred_boxes, gt_boxes):
+        """
+        Args:
+            pred_boxes: (N, 4) in [x1, y1, x2, y2] format
+            gt_boxes: (N, 4) in [x1, y1, x2, y2] format
+        """
+        # Overlap area
+        x1 = torch.max(pred_boxes[:, 0], gt_boxes[:, 0])
+        y1 = torch.max(pred_boxes[:, 1], gt_boxes[:, 1])
+        x2 = torch.min(pred_boxes[:, 2], gt_boxes[:, 2])
+        y2 = torch.min(pred_boxes[:, 3], gt_boxes[:, 3])
+
+        inter = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+        area_pred = (pred_boxes[:, 2] - pred_boxes[:, 0]) * (pred_boxes[:, 3] - pred_boxes[:, 1])
+        area_gt = (gt_boxes[:, 2] - gt_boxes[:, 0]) * (gt_boxes[:, 3] - gt_boxes[:, 1])
+        union = area_pred + area_gt - inter + self.eps
+        iou = inter / union
+
+        # Center distance
+        p_cx = (pred_boxes[:, 0] + pred_boxes[:, 2]) / 2
+        p_cy = (pred_boxes[:, 1] + pred_boxes[:, 3]) / 2
+        g_cx = (gt_boxes[:, 0] + gt_boxes[:, 2]) / 2
+        g_cy = (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2
+        center_dist = (p_cx - g_cx) ** 2 + (p_cy - g_cy) ** 2
+
+        # Enclosing box diagonal
+        ex1 = torch.min(pred_boxes[:, 0], gt_boxes[:, 0])
+        ey1 = torch.min(pred_boxes[:, 1], gt_boxes[:, 1])
+        ex2 = torch.max(pred_boxes[:, 2], gt_boxes[:, 2])
+        ey2 = torch.max(pred_boxes[:, 3], gt_boxes[:, 3])
+        c2 = (ex2 - ex1).clamp(min=0) ** 2 + (ey2 - ey1).clamp(min=0) ** 2 + self.eps
+
+        # Aspect ratio consistency
+        w_pred = (pred_boxes[:, 2] - pred_boxes[:, 0]).clamp(min=self.eps)
+        h_pred = (pred_boxes[:, 3] - pred_boxes[:, 1]).clamp(min=self.eps)
+        w_gt = (gt_boxes[:, 2] - gt_boxes[:, 0]).clamp(min=self.eps)
+        h_gt = (gt_boxes[:, 3] - gt_boxes[:, 1]).clamp(min=self.eps)
+
+        v = (4 / (math.pi ** 2)) * torch.pow(
+            torch.atan(w_gt / h_gt) - torch.atan(w_pred / h_pred), 2
+        )
+        with torch.no_grad():
+            alpha = v / (1 - iou + v + self.eps)
+
+        ciou = iou - (center_dist / c2) - alpha * v
+        loss = 1.0 - ciou
+
+        if self.reduction == "sum":
+            return loss.sum()
+        elif self.reduction == "mean":
+            return loss.mean() if loss.numel() > 0 else loss.sum()
+        return loss
+
+
+class DistributionFocalLoss(nn.Module):
+    """Distribution Focal Loss (DFL) from Generalized Focal Loss (GFL)."""
+
+    def __init__(self, reg_max=16, reduction="mean"):
+        super().__init__()
+        self.reg_max = reg_max
+        self.reduction = reduction
+
+    def forward(self, pred_dist, target):
+        """
+        Args:
+            pred_dist: (N, 4, reg_max + 1) predicted logits
+            target: (N, 4) target coordinate value in range [0, reg_max]
+        """
+        # Reshape to (N * 4, reg_max + 1)
+        pred_dist = pred_dist.reshape(-1, self.reg_max + 1)
+        target = target.reshape(-1)
+        
+        # Clamp target to [0, reg_max - eps]
+        target = target.clamp(min=0, max=self.reg_max - 0.0001)
+        
+        target_left = target.long()
+        target_right = target_left + 1
+        
+        weight_left = target_right.float() - target
+        weight_right = target - target_left.float()
+        
+        log_prob = F.log_softmax(pred_dist, dim=-1)
+        
+        loss = - (weight_left * log_prob.gather(1, target_left.unsqueeze(1)).squeeze(1) +
+                  weight_right * log_prob.gather(1, target_right.unsqueeze(1)).squeeze(1))
+                  
+        if self.reduction == "sum":
+            return loss.sum()
+        elif self.reduction == "mean":
+            return loss.mean() if loss.numel() > 0 else loss.sum()
+        return loss
+
+
 class DetectionLoss(nn.Module):
-    """Combined detection loss: Focal Loss + Smooth L1.
+    """Combined detection loss: Quality Focal Loss + CIoU Loss + optional DFL.
 
     Handles anchor-target matching internally.
     """
@@ -288,23 +441,26 @@ class DetectionLoss(nn.Module):
         alpha=0.25,
         gamma=2.0,
         box_loss_weight=1.0,
+        reg_max=16,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.pos_iou_thresh = pos_iou_thresh
         self.neg_iou_thresh = neg_iou_thresh
         self.box_loss_weight = box_loss_weight
+        self.reg_max = reg_max
 
-        # Background = class 0, object classes = 1..num_classes
-        # But for focal loss we use num_classes (no explicit background)
-        self.cls_loss = FocalLoss(alpha=alpha, gamma=gamma, reduction="sum")
-        self.reg_loss = SmoothL1Loss(reduction="sum")
+        # Classification: Quality Focal Loss (behaves like Focal Loss for binary targets)
+        self.cls_loss = QualityFocalLoss(alpha=alpha, beta=gamma, reduction="sum")
+        # Bounding box regression: CIoU Loss + Distribution Focal Loss
+        self.reg_loss = CIoULoss(reduction="sum")
+        self.dfl_loss = DistributionFocalLoss(reg_max=reg_max, reduction="sum")
 
     def forward(self, cls_preds, reg_preds, anchors, targets):
         """
         Args:
             cls_preds: (B, total_anchors, num_classes)
-            reg_preds: (B, total_anchors, 4)
+            reg_preds: (B, total_anchors, 4) or (B, total_anchors, 4 * (reg_max + 1))
             anchors: (total_anchors, 4)
             targets: list of dicts, each with 'boxes' (N, 4) and 'labels' (N,)
 
@@ -321,6 +477,30 @@ class DetectionLoss(nn.Module):
         all_cls_targets = []
         all_reg_preds = []
         all_reg_targets = []
+        
+        # Distribution Focal Loss metrics
+        all_dfl_preds = []
+        all_dfl_targets = []
+
+        # Check if regression head outputs distribution bins
+        num_reg_channels = reg_preds.shape[-1]
+        use_dfl = num_reg_channels > 4
+        
+        if use_dfl:
+            reg_max = num_reg_channels // 4 - 1
+            assert reg_max == self.reg_max, (
+                f"reg_preds has {num_reg_channels} channels (reg_max={reg_max}), "
+                f"but DetectionLoss was configured with reg_max={self.reg_max}"
+            )
+            # Projection of distribution to continuous offsets
+            B, A, _ = reg_preds.shape
+            reg_dist = reg_preds.reshape(B, A, 4, reg_max + 1)
+            prob = F.softmax(reg_dist, dim=-1)
+            weights = torch.arange(reg_max + 1, dtype=prob.dtype, device=prob.device)
+            pred_offsets = torch.sum(prob * weights, dim=-1)  # (B, A, 4)
+        else:
+            pred_offsets = reg_preds  # (B, A, 4)
+
         total_pos = 0
 
         for b in range(batch_size):
@@ -334,8 +514,8 @@ class DetectionLoss(nn.Module):
                 )
                 all_cls_preds.append(cls_preds[b])
                 all_cls_targets.append(cls_targets)
-                # Append empty reg tensors for symmetry with GT branch
-                all_reg_preds.append(reg_preds[b][:0])
+                # Append empty reg tensors for symmetry
+                all_reg_preds.append(torch.zeros(0, 4, device=device))
                 all_reg_targets.append(torch.zeros(0, 4, device=device))
                 continue
 
@@ -365,34 +545,75 @@ class DetectionLoss(nn.Module):
             for gt_i in range(len(gt_boxes)):
                 anchor_i = gt_max_idx[gt_i]
                 cls_targets[anchor_i] = gt_labels[gt_i]
+                max_idx[anchor_i] = gt_i  # keep regression target consistent
                 pos_mask[anchor_i] = True
-
-            # Encode regression targets (only for positive anchors)
-            matched_gt = gt_boxes[max_idx[pos_mask]]
-            reg_targets_pos = encode_boxes(
-                matched_gt, anchors[pos_mask], weights=BOX_WEIGHTS
-            )
 
             num_pos = pos_mask.sum().item()
             total_pos += num_pos
 
             all_cls_preds.append(cls_preds[b])
             all_cls_targets.append(cls_targets)
-            all_reg_preds.append(reg_preds[b][pos_mask])
-            all_reg_targets.append(reg_targets_pos)
+
+            # Collect regression predictions and targets
+            if num_pos > 0:
+                matched_gt = gt_boxes[max_idx[pos_mask]]
+                # For CIoU loss, we decode predicted box deltas to actual boxes
+                if use_dfl:
+                    a_cx = (anchors[pos_mask, 0] + anchors[pos_mask, 2]) / 2
+                    a_cy = (anchors[pos_mask, 1] + anchors[pos_mask, 3]) / 2
+                    a_w = (anchors[pos_mask, 2] - anchors[pos_mask, 0]).clamp(min=1e-7)
+                    a_h = (anchors[pos_mask, 3] - anchors[pos_mask, 1]).clamp(min=1e-7)
+                    l, t, r, b_ = pred_offsets[b][pos_mask].unbind(-1)
+                    pred_boxes_pos = torch.stack([
+                        a_cx - l * a_w,
+                        a_cy - t * a_h,
+                        a_cx + r * a_w,
+                        a_cy + b_ * a_h
+                    ], dim=1)
+                else:
+                    pred_boxes_pos = decode_boxes(
+                        pred_offsets[b][pos_mask], anchors[pos_mask], weights=BOX_WEIGHTS
+                    )
+                all_reg_preds.append(pred_boxes_pos)
+                all_reg_targets.append(matched_gt)
+                
+                if use_dfl:
+                    # Compute LTRB targets for DFL
+                    a_cx = (anchors[pos_mask, 0] + anchors[pos_mask, 2]) / 2
+                    a_cy = (anchors[pos_mask, 1] + anchors[pos_mask, 3]) / 2
+                    a_w = (anchors[pos_mask, 2] - anchors[pos_mask, 0]).clamp(min=1e-7)
+                    a_h = (anchors[pos_mask, 3] - anchors[pos_mask, 1]).clamp(min=1e-7)
+                    
+                    l_target = (a_cx - matched_gt[:, 0]) / a_w
+                    t_target = (a_cy - matched_gt[:, 1]) / a_h
+                    r_target = (matched_gt[:, 2] - a_cx) / a_w
+                    b_target = (matched_gt[:, 3] - a_cy) / a_h
+                    
+                    # Stack LTRB targets
+                    targets_ltrb = torch.stack([l_target, t_target, r_target, b_target], dim=1)
+                    all_dfl_preds.append(reg_dist[b][pos_mask])
+                    all_dfl_targets.append(targets_ltrb)
+            else:
+                all_reg_preds.append(torch.zeros(0, 4, device=device))
+                all_reg_targets.append(torch.zeros(0, 4, device=device))
 
         # Flatten and compute losses
         all_cls_preds = torch.cat(all_cls_preds, dim=0)
         all_cls_targets = torch.cat(all_cls_targets, dim=0)
 
-        # For focal loss, background = class 0, objects = 1..C
-        # Remap: 0 (bg) stays 0, classes 1..C stay
         cls_loss = self.cls_loss(all_cls_preds, all_cls_targets)
 
         if total_pos > 0:
             all_reg_preds = torch.cat(all_reg_preds, dim=0)
             all_reg_targets = torch.cat(all_reg_targets, dim=0)
             reg_loss = self.reg_loss(all_reg_preds, all_reg_targets)
+            
+            if use_dfl:
+                all_dfl_preds = torch.cat(all_dfl_preds, dim=0)
+                all_dfl_targets = torch.cat(all_dfl_targets, dim=0)
+                dfl_loss_val = self.dfl_loss(all_dfl_preds, all_dfl_targets)
+                # Combine box regression losses: CIoU + 0.5 * DFL
+                reg_loss = reg_loss + 0.5 * dfl_loss_val
         else:
             reg_loss = torch.tensor(0.0, device=device)
 
