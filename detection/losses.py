@@ -606,24 +606,35 @@ class DetectionLoss(nn.Module):
         if total_pos > 0:
             all_reg_preds = torch.cat(all_reg_preds, dim=0)
             all_reg_targets = torch.cat(all_reg_targets, dim=0)
-            reg_loss = self.reg_loss(all_reg_preds, all_reg_targets)
-            
+            ciou_loss_val = self.reg_loss(all_reg_preds, all_reg_targets)
+            reg_loss = ciou_loss_val
+
             if use_dfl:
                 all_dfl_preds = torch.cat(all_dfl_preds, dim=0)
                 all_dfl_targets = torch.cat(all_dfl_targets, dim=0)
                 dfl_loss_val = self.dfl_loss(all_dfl_preds, all_dfl_targets)
                 # Combine box regression losses: CIoU + 0.5 * DFL
                 reg_loss = reg_loss + 0.5 * dfl_loss_val
+            else:
+                dfl_loss_val = torch.tensor(0.0, device=device)
         else:
+            ciou_loss_val = torch.tensor(0.0, device=device)
+            dfl_loss_val = torch.tensor(0.0, device=device)
             reg_loss = torch.tensor(0.0, device=device)
 
         # Normalize by number of positive samples
         normalizer = max(total_pos, 1)
         cls_loss = cls_loss / normalizer
         reg_loss = reg_loss / normalizer
+        ciou_loss = ciou_loss_val / normalizer
+        dfl_loss = (0.5 * dfl_loss_val) / normalizer if use_dfl else torch.tensor(0.0, device=device)
 
-        return {
+        loss_out = {
             "cls_loss": cls_loss,
             "reg_loss": self.box_loss_weight * reg_loss,
+            "ciou_loss": self.box_loss_weight * ciou_loss,
             "num_pos": total_pos,
         }
+        if use_dfl:
+            loss_out["dfl_loss"] = dfl_loss
+        return loss_out

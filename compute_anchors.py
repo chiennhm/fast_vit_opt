@@ -1,16 +1,16 @@
 #
-# Compute optimal anchor boxes using K-Means++ clustering on PASCAL VOC
+# Compute optimal anchor boxes using K-Means++ clustering on PASCAL VOC / COCO / BDD100K
 #
 # This script:
-#   1. Scans all VOC training annotations to extract bounding box dimensions
+#   1. Scans training annotations to extract bounding box dimensions
 #   2. Normalizes (width, height) relative to image size
 #   3. Runs K-Means++ to find optimal anchor (width, height) clusters
-#   4. Assigns anchors to FPN levels based on area
+#   4. Assigns anchors to 5 FPN levels (P2, P3, P4, P5, P6) based on area
 #   5. Prints ready-to-use anchor config for FastViTDetector
 #
 # Usage:
-#   python compute_anchors.py --data-dir ./data --num-anchors 12 --img-size 512
-#   python compute_anchors.py --data-dir ./data --num-anchors 9 --num-levels 4
+#   python compute_anchors.py --dataset bdd100k --ann-file ./data/bdd100k/train/annotations/coco_instances_train.json --img-size 800
+#   python compute_anchors.py --dataset voc --data-dir ./data --num-anchors 15 --img-size 800
 #
 
 import argparse
@@ -30,26 +30,10 @@ except ImportError:
 # VOC annotation parsing
 # ============================================================================
 VOC_CLASSES = [
-    "aeroplane",
-    "bicycle",
-    "bird",
-    "boat",
-    "bottle",
-    "bus",
-    "car",
-    "cat",
-    "chair",
-    "cow",
-    "diningtable",
-    "dog",
-    "horse",
-    "motorbike",
-    "person",
-    "pottedplant",
-    "sheep",
-    "sofa",
-    "train",
-    "tvmonitor",
+    "aeroplane", "bicycle", "bird", "boat", "bottle",
+    "bus", "car", "cat", "chair", "cow",
+    "diningtable", "dog", "horse", "motorbike", "person",
+    "pottedplant", "sheep", "sofa", "train", "tvmonitor",
 ]
 
 
@@ -68,7 +52,7 @@ def collect_voc_boxes(data_dir, years=("2007", "2012"), image_sets=("trainval",)
     for year in years:
         for image_set in image_sets:
             # VOC directory structure
-            voc_root = os.path.join(data_dir, "VOCdevkit", f"VOC{year}")
+            voc_root = os.path.join(data_dir, f"VOCdevkit", f"VOC{year}")
             sets_file = os.path.join(voc_root, "ImageSets", "Main", f"{image_set}.txt")
 
             if not os.path.exists(sets_file):
@@ -123,27 +107,26 @@ def collect_voc_boxes(data_dir, years=("2007", "2012"), image_sets=("trainval",)
                     class_counts[name] += 1
 
     print(f"\nTotal: {num_images} images, {len(wh_absolute)} boxes")
-    print("\nClass distribution:")
+    print(f"\nClass distribution:")
     for cls in VOC_CLASSES:
         print(f"  {cls:15s}: {class_counts[cls]:>5d}")
 
-    return np.array(wh_absolute, dtype=np.float64), np.array(
-        wh_relative, dtype=np.float64
-    )
+    return np.array(wh_absolute, dtype=np.float64), np.array(wh_relative, dtype=np.float64)
 
 
-def collect_coco_style_boxes(ann_file):
-    """Collect bounding box (width, height) from COCO-style JSON annotations.
+def collect_coco_boxes(ann_file):
+    """Collect bounding box (width, height) from COCO/BDD100K JSON annotations.
 
     Returns:
-        wh_absolute: np.ndarray of shape (N, 2) — absolute pixel widths/heights
-        wh_relative: np.ndarray of shape (N, 2) — widths/heights normalized by image size
+        wh_absolute: np.ndarray of shape (N, 2)
+        wh_relative: np.ndarray of shape (N, 2)
     """
     import json
-
+    print(f"Loading annotations from {ann_file}...")
     with open(ann_file, "r") as f:
         coco_data = json.load(f)
 
+    # Build image sizes lookup
     images = {img["id"]: img for img in coco_data["images"]}
 
     wh_absolute = []
@@ -153,26 +136,25 @@ def collect_coco_style_boxes(ann_file):
         img_id = ann["image_id"]
         if img_id not in images:
             continue
-        img_info = images[img_id]
-        img_w = float(img_info["width"])
-        img_h = float(img_info["height"])
-
+        
+        img_w = float(images[img_id]["width"])
+        img_h = float(images[img_id]["height"])
+        
         if img_w <= 0 or img_h <= 0:
             continue
 
-        bbox = ann["bbox"]  # [x, y, w, h] in COCO format
+        bbox = ann["bbox"]  # [x, y, w, h]
         w = float(bbox[2])
         h = float(bbox[3])
 
-        if w > 0 and h > 0:
-            wh_absolute.append([w, h])
-            wh_relative.append([w / img_w, h / img_h])
+        if w <= 0 or h <= 0:
+            continue
 
-    print(f"\nTotal: {len(coco_data['images'])} images, {len(wh_absolute)} boxes")
+        wh_absolute.append([w, h])
+        wh_relative.append([w / img_w, h / img_h])
 
-    return np.array(wh_absolute, dtype=np.float64), np.array(
-        wh_relative, dtype=np.float64
-    )
+    print(f"\nTotal: {len(images)} images, {len(wh_absolute)} boxes collected.")
+    return np.array(wh_absolute, dtype=np.float64), np.array(wh_relative, dtype=np.float64)
 
 
 # ============================================================================
@@ -200,8 +182,6 @@ def kmeans_pp_init(data, k, rng):
 
     for _ in range(1, k):
         # 2. Compute squared distance from each point to nearest centroid
-        dists = np.array([np.min(np.sum((data - c) ** 2, axis=1)) for c in centroids])
-        # dists has shape (num_centroids, N) — we need min across centroids per point
         dists = np.min(
             np.stack([np.sum((data - c) ** 2, axis=1) for c in centroids], axis=0),
             axis=0,
@@ -227,17 +207,16 @@ def iou_distance(wh, centroids):
     Returns:
         distances: (N, k) where distance = 1 - IoU
     """
+    N = wh.shape[0]
+    k = centroids.shape[0]
 
-    # Intersection: min(w, cw) * min(h, ch)
-    # Both boxes centered at origin, so intersection is simply
-    # min(w_i, cw_j) * min(h_i, ch_j)
-    wh_exp = wh[:, np.newaxis, :]  # (N, 1, 2)
+    wh_exp = wh[:, np.newaxis, :]       # (N, 1, 2)
     c_exp = centroids[np.newaxis, :, :]  # (1, k, 2)
 
     inter = np.prod(np.minimum(wh_exp, c_exp), axis=2)  # (N, k)
 
-    area_wh = wh[:, 0] * wh[:, 1]  # (N,)
-    area_c = centroids[:, 0] * centroids[:, 1]  # (k,)
+    area_wh = wh[:, 0] * wh[:, 1]               # (N,)
+    area_c = centroids[:, 0] * centroids[:, 1]   # (k,)
 
     union = area_wh[:, np.newaxis] + area_c[np.newaxis, :] - inter  # (N, k)
 
@@ -279,9 +258,7 @@ def kmeans_iou(wh, k, max_iter=300, num_trials=10, seed=42):
             assignments = np.argmin(dists, axis=1)  # (N,)
 
             # Check convergence
-            if prev_assignments is not None and np.array_equal(
-                assignments, prev_assignments
-            ):
+            if prev_assignments is not None and np.array_equal(assignments, prev_assignments):
                 break
             prev_assignments = assignments
 
@@ -306,9 +283,7 @@ def kmeans_iou(wh, k, max_iter=300, num_trials=10, seed=42):
             best_centroids = centroids.copy()
             best_assignments = assignments.copy()
 
-        print(
-            f"  Trial {trial + 1}/{num_trials}: avg IoU = {avg_iou:.4f} ({iteration + 1} iters)"
-        )
+        print(f"  Trial {trial + 1}/{num_trials}: avg IoU = {avg_iou:.4f} ({iteration + 1} iters)")
 
     return best_centroids, best_assignments, best_avg_iou
 
@@ -339,14 +314,10 @@ def kmeans_euclidean(wh, k, max_iter=300, num_trials=10, seed=42):
         prev_assignments = None
         for iteration in range(max_iter):
             # Euclidean distance
-            dists = np.sum(
-                (wh[:, np.newaxis, :] - centroids[np.newaxis, :, :]) ** 2, axis=2
-            )
+            dists = np.sum((wh[:, np.newaxis, :] - centroids[np.newaxis, :, :]) ** 2, axis=2)
             assignments = np.argmin(dists, axis=1)
 
-            if prev_assignments is not None and np.array_equal(
-                assignments, prev_assignments
-            ):
+            if prev_assignments is not None and np.array_equal(assignments, prev_assignments):
                 break
             prev_assignments = assignments
 
@@ -359,9 +330,7 @@ def kmeans_euclidean(wh, k, max_iter=300, num_trials=10, seed=42):
                     new_centroids[j] = wh[rng.integers(len(wh))]
             centroids = new_centroids
 
-        dists = np.sum(
-            (wh[:, np.newaxis, :] - centroids[np.newaxis, :, :]) ** 2, axis=2
-        )
+        dists = np.sum((wh[:, np.newaxis, :] - centroids[np.newaxis, :, :]) ** 2, axis=2)
         inertia = np.sum(np.min(dists, axis=1))
 
         if inertia < best_inertia:
@@ -369,9 +338,7 @@ def kmeans_euclidean(wh, k, max_iter=300, num_trials=10, seed=42):
             best_centroids = centroids.copy()
             best_assignments = assignments.copy()
 
-        print(
-            f"  Trial {trial + 1}/{num_trials}: inertia = {inertia:.2f} ({iteration + 1} iters)"
-        )
+        print(f"  Trial {trial + 1}/{num_trials}: inertia = {inertia:.2f} ({iteration + 1} iters)")
 
     return best_centroids, best_assignments, best_inertia
 
@@ -379,15 +346,15 @@ def kmeans_euclidean(wh, k, max_iter=300, num_trials=10, seed=42):
 # ============================================================================
 # Assign anchors to FPN levels
 # ============================================================================
-def assign_to_fpn_levels(centroids, num_levels=4):
+def assign_to_fpn_levels(centroids, num_levels=5):
     """Assign anchors to FPN levels based on anchor area.
 
-    Smaller anchors → lower FPN levels (higher resolution),
-    larger anchors → higher FPN levels (lower resolution).
+    Smaller anchors → lower FPN levels (P2, P3),
+    larger anchors → higher FPN levels (P4, P5, P6).
 
     Args:
         centroids: (k, 2) anchor widths/heights
-        num_levels: number of FPN levels
+        num_levels: number of FPN levels (default: 5 for P2-P6)
 
     Returns:
         level_anchors: dict mapping level_idx → list of (w, h) tuples
@@ -406,7 +373,7 @@ def assign_to_fpn_levels(centroids, num_levels=4):
     idx = 0
     for level in range(num_levels):
         count = per_level + (1 if level < remainder else 0)
-        level_anchors[level] = sorted_centroids[idx : idx + count]
+        level_anchors[level] = sorted_centroids[idx:idx + count]
         idx += count
 
     return level_anchors
@@ -415,17 +382,11 @@ def assign_to_fpn_levels(centroids, num_levels=4):
 def compute_base_sizes_and_ratios(level_anchors):
     """Convert per-level anchor (w,h) pairs into base_size + aspect_ratios + scales.
 
-    For each FPN level, compute:
-      - base_size: geometric mean of sqrt(w*h) for all anchors at that level
-      - For each anchor at that level, its scale relative to base_size and aspect ratio
-
     Args:
         level_anchors: dict mapping level_idx → (num_anchors_per_level, 2) array
 
     Returns:
         anchor_sizes: tuple of base sizes per FPN level
-        all_ratios: set of unique aspect ratios
-        all_scales: set of unique scales
     """
     anchor_sizes = []
 
@@ -444,7 +405,7 @@ def compute_base_sizes_and_ratios(level_anchors):
 
 
 # ============================================================================
-# Visualization
+# Visualization & Results
 # ============================================================================
 def print_box_statistics(wh_abs, wh_rel, img_size):
     """Print bounding box size statistics."""
@@ -452,30 +413,22 @@ def print_box_statistics(wh_abs, wh_rel, img_size):
     print("Bounding Box Statistics")
     print("=" * 60)
 
-    print("\nAbsolute (pixels):")
-    print(
-        f"  Width  — min: {wh_abs[:, 0].min():.1f}, max: {wh_abs[:, 0].max():.1f}, "
-        f"mean: {wh_abs[:, 0].mean():.1f}, median: {np.median(wh_abs[:, 0]):.1f}"
-    )
-    print(
-        f"  Height — min: {wh_abs[:, 1].min():.1f}, max: {wh_abs[:, 1].max():.1f}, "
-        f"mean: {wh_abs[:, 1].mean():.1f}, median: {np.median(wh_abs[:, 1]):.1f}"
-    )
+    print(f"\nAbsolute (pixels):")
+    print(f"  Width  — min: {wh_abs[:, 0].min():.1f}, max: {wh_abs[:, 0].max():.1f}, "
+          f"mean: {wh_abs[:, 0].mean():.1f}, median: {np.median(wh_abs[:, 0]):.1f}")
+    print(f"  Height — min: {wh_abs[:, 1].min():.1f}, max: {wh_abs[:, 1].max():.1f}, "
+          f"mean: {wh_abs[:, 1].mean():.1f}, median: {np.median(wh_abs[:, 1]):.1f}")
 
     areas = wh_abs[:, 0] * wh_abs[:, 1]
-    print(
-        f"  Area   — min: {areas.min():.0f}, max: {areas.max():.0f}, "
-        f"mean: {areas.mean():.0f}, median: {np.median(areas):.0f}"
-    )
+    print(f"  Area   — min: {areas.min():.0f}, max: {areas.max():.0f}, "
+          f"mean: {areas.mean():.0f}, median: {np.median(areas):.0f}")
 
     ratios = wh_abs[:, 0] / (wh_abs[:, 1] + 1e-9)
-    print(
-        f"  Ratio (w/h) — min: {ratios.min():.2f}, max: {ratios.max():.2f}, "
-        f"mean: {ratios.mean():.2f}, median: {np.median(ratios):.2f}"
-    )
+    print(f"  Ratio (w/h) — min: {ratios.min():.2f}, max: {ratios.max():.2f}, "
+          f"mean: {ratios.mean():.2f}, median: {np.median(ratios):.2f}")
 
     # Size distribution in percentiles
-    print("\n  Size percentiles (sqrt(area) in pixels):")
+    print(f"\n  Size percentiles (sqrt(area) in pixels):")
     sqrt_areas = np.sqrt(areas)
     for p in [5, 10, 25, 50, 75, 90, 95]:
         print(f"    {p}th: {np.percentile(sqrt_areas, p):.1f}")
@@ -488,9 +441,7 @@ def print_box_statistics(wh_abs, wh_rel, img_size):
     print(f"  Height — mean: {scaled_h.mean():.1f}, median: {np.median(scaled_h):.1f}")
 
 
-def print_anchor_results(
-    centroids_rel, avg_iou, img_size, level_anchors, dataset="voc"
-):
+def print_anchor_results(centroids_rel, avg_iou, img_size, level_anchors):
     """Print the computed anchor boxes."""
     print("\n" + "=" * 60)
     print(f"K-Means++ Anchor Boxes (avg IoU = {avg_iou:.4f})")
@@ -505,16 +456,16 @@ def print_anchor_results(
         w = centroids_rel[idx, 0] * img_size
         h = centroids_rel[idx, 1] * img_size
         ratio = w / (h + 1e-9)
-        print(
-            f"  Anchor {i:2d}: {w:7.1f} x {h:7.1f}  (ratio={ratio:.2f}, area={w * h:.0f})"
-        )
+        print(f"  Anchor {i:2d}: {w:7.1f} x {h:7.1f}  (ratio={ratio:.2f}, area={w * h:.0f})")
 
-    print("\nAnchors assigned to FPN levels:")
+    print(f"\nAnchors assigned to FPN levels (P2, P3, P4, P5, P6):")
     anchor_sizes = []
+    level_names = ["P2", "P3", "P4", "P5", "P6"]
     for level in sorted(level_anchors.keys()):
         anchors = level_anchors[level]
+        name = level_names[level] if level < len(level_names) else f"P{level+2}"
         if len(anchors) == 0:
-            print(f"  Level {level}: (empty)")
+            print(f"  Level {level} ({name}): (empty)")
             continue
 
         scaled = anchors * img_size
@@ -522,7 +473,7 @@ def print_anchor_results(
         base_size = np.exp(np.mean(np.log(np.sqrt(areas_level) + 1e-9)))
         anchor_sizes.append(base_size)
 
-        print(f"  Level {level} (base_size≈{base_size:.1f}):")
+        print(f"  Level {level} ({name}, base_size≈{base_size:.1f}):")
         for j, (w, h) in enumerate(scaled):
             ratio = w / (h + 1e-9)
             scale = math.sqrt(w * h) / base_size
@@ -557,24 +508,12 @@ def print_anchor_results(
     print(f"aspect_ratios = {tuple(unique_ratios)}")
     print(f"scales = {tuple(unique_scales)}")
 
-    # Per-level detailed config (custom anchors per level)
-    print(f"\n# Per-level anchor boxes (w, h) at img_size={img_size}:")
-    print("CUSTOM_ANCHORS = {")
-    for level in sorted(level_anchors.keys()):
-        anchors = level_anchors[level]
-        scaled = anchors * img_size
-        pairs = [(round(w, 1), round(h, 1)) for w, h in scaled]
-        print(f"    {level}: {pairs},")
-    print("}")
-
     # Print for FastViTDetector constructor
-    num_cls = 80 if dataset == "coco" else (10 if dataset == "bdd100k" else 20)
-    print("\n# For FastViTDetector constructor:")
-    print("model = FastViTDetector(")
-    print("    model_name='fastvit_sa12',")
-    print(f"    num_classes={num_cls},")
+    print(f"\n# For FastViTDetector constructor:")
+    print(f"model = FastViTDetector(")
+    print(f"    model_name='fastvit_sa12',")
     print(f"    anchor_sizes={anchor_sizes_int},")
-    print(")")
+    print(f")")
 
 
 # ============================================================================
@@ -582,82 +521,62 @@ def print_anchor_results(
 # ============================================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="Compute optimal anchor boxes using K-Means++ on VOC dataset"
+        description="Compute optimal anchor boxes using K-Means++ on VOC/COCO/BDD100K datasets"
     )
     parser.add_argument(
-        "--data-dir",
-        type=str,
-        default="./data",
-        help="Root directory for datasets (default: ./data)",
+        "--dataset", type=str, default="voc", choices=["voc", "coco", "bdd100k"],
+        help="Dataset type to run anchors calculation on (default: voc)"
     )
     parser.add_argument(
-        "--dataset",
-        type=str,
-        default="voc",
-        choices=["voc", "coco", "bdd100k"],
-        help="Dataset to use: voc, coco, or bdd100k (default: voc)",
+        "--data-dir", type=str, default="./data",
+        help="Root directory for VOC dataset (default: ./data)"
     )
     parser.add_argument(
-        "--ann-file",
-        type=str,
-        default=None,
-        help="Path to COCO/BDD100K JSON annotations (default: None, auto-resolved)",
+        "--ann-file", type=str, default=None,
+        help="Path to JSON annotations file (required for coco/bdd100k)"
     )
     parser.add_argument(
-        "--num-anchors",
-        "-k",
-        type=int,
-        default=12,
-        help="Total number of anchor clusters (default: 12)",
+        "--num-anchors", "-k", type=int, default=15,
+        help="Total number of anchor clusters (default: 15 for 5 FPN levels x 3 anchors)"
     )
     parser.add_argument(
-        "--num-levels",
-        type=int,
-        default=4,
-        help="Number of FPN levels (default: 4, matching FastViT stages)",
+        "--num-levels", type=int, default=5,
+        help="Number of FPN levels (default: 5, matching P2, P3, P4, P5, P6 stages)"
     )
     parser.add_argument(
-        "--img-size",
-        type=int,
-        default=512,
-        help="Target image size for scaling (default: 512)",
+        "--img-size", type=int, default=800,
+        help="Target image size for scaling (default: 800, matching paper standard)"
     )
     parser.add_argument(
-        "--distance",
-        type=str,
-        default="iou",
-        choices=["iou", "euclidean"],
-        help="Distance metric for K-Means (default: iou)",
+        "--distance", type=str, default="iou", choices=["iou", "euclidean"],
+        help="Distance metric for K-Means (default: iou)"
     )
     parser.add_argument(
-        "--max-iter",
-        type=int,
-        default=300,
-        help="Max iterations per K-Means trial (default: 300)",
+        "--max-iter", type=int, default=300,
+        help="Max iterations per K-Means trial (default: 300)"
     )
     parser.add_argument(
-        "--num-trials",
-        type=int,
-        default=10,
-        help="Number of K-Means trials (default: 10)",
+        "--num-trials", type=int, default=10,
+        help="Number of K-Means trials (default: 10)"
     )
     parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed (default: 42)"
+        "--seed", type=int, default=42,
+        help="Random seed (default: 42)"
     )
     parser.add_argument(
-        "--years",
-        type=str,
-        nargs="+",
-        default=["2007", "2012"],
-        help="VOC years to use (default: 2007 2012)",
+        "--years", type=str, nargs="+", default=["2007", "2012"],
+        help="VOC years to use (default: 2007 2012)"
     )
 
     args = parser.parse_args()
 
     print("=" * 60)
-    print("K-Means++ Anchor Box Computation for PASCAL VOC")
+    print(f"K-Means++ Anchor Box Computation for {args.dataset.upper()}")
     print("=" * 60)
-    print(f"  Data dir:     {args.data_dir}")
+    if args.dataset == "voc":
+        print(f"  Data dir:     {args.data_dir}")
+    else:
+        print(f"  Ann file:     {args.ann_file}")
     print(f"  Num anchors:  {args.num_anchors}")
     print(f"  Num levels:   {args.num_levels}")
     print(f"  Image size:   {args.img_size}")
@@ -673,53 +592,41 @@ def main():
             args.data_dir, years=tuple(args.years), image_sets=("trainval",)
         )
     else:
-        ann_file = args.ann_file
-        if not ann_file:
-            if args.dataset == "coco":
-                ann_file = os.path.join(
-                    args.data_dir, "coco", "annotations", "instances_train2017.json"
-                )
-            elif args.dataset == "bdd100k":
-                ann_file = os.path.join(
-                    args.data_dir,
-                    "bdd100k",
-                    "annotations",
-                    "bdd100k_det_train_coco.json",
-                )
-
-        print(
-            f"Step 1: Collecting bounding boxes from COCO-style annotations ({ann_file})..."
-        )
-        if not os.path.exists(ann_file):
-            print(f"ERROR: Annotation file {ann_file} not found!")
+        if args.ann_file is None:
+            # Try to guess default annotation file for bdd100k
+            if args.dataset == "bdd100k":
+                args.ann_file = os.path.join(args.data_dir, "bdd100k", "train", "annotations", "coco_instances_train.json")
+                if not os.path.exists(args.ann_file):
+                    args.ann_file = "./data/bdd100k/train/annotations/coco_instances_train.json"
+            else:
+                args.ann_file = os.path.join(args.data_dir, "coco", "annotations", "instances_train2017.json")
+                
+        if not os.path.exists(args.ann_file):
+            print(f"ERROR: Annotation file not found: {args.ann_file}. Please specify --ann-file.")
             return
-        wh_abs, wh_rel = collect_coco_style_boxes(ann_file)
+
+        print(f"Step 1: Collecting bounding boxes from {args.dataset.upper()} annotations...")
+        wh_abs, wh_rel = collect_coco_boxes(args.ann_file)
 
     if len(wh_abs) == 0:
-        print("ERROR: No bounding boxes found! Check --data-dir path.")
+        print("ERROR: No bounding boxes found! Check paths.")
         return
 
     # Print statistics
     print_box_statistics(wh_abs, wh_rel, args.img_size)
 
     # Step 2: K-Means++
-    print(
-        f"\nStep 2: Running K-Means++ (k={args.num_anchors}, metric={args.distance})..."
-    )
+    print(f"\nStep 2: Running K-Means++ (k={args.num_anchors}, metric={args.distance})...")
     if args.distance == "iou":
         centroids, assignments, avg_iou = kmeans_iou(
-            wh_rel,
-            k=args.num_anchors,
-            max_iter=args.max_iter,
-            num_trials=args.num_trials,
+            wh_rel, k=args.num_anchors,
+            max_iter=args.max_iter, num_trials=args.num_trials,
             seed=args.seed,
         )
     else:
         centroids, assignments, inertia = kmeans_euclidean(
-            wh_rel,
-            k=args.num_anchors,
-            max_iter=args.max_iter,
-            num_trials=args.num_trials,
+            wh_rel, k=args.num_anchors,
+            max_iter=args.max_iter, num_trials=args.num_trials,
             seed=args.seed,
         )
         # Compute avg IoU for comparison
@@ -728,23 +635,17 @@ def main():
         print(f"  Euclidean K-Means avg IoU: {avg_iou:.4f}")
 
     # Step 3: Assign to FPN levels
-    print(
-        f"\nStep 3: Assigning {args.num_anchors} anchors to {args.num_levels} FPN levels..."
-    )
+    print(f"\nStep 3: Assigning {args.num_anchors} anchors to {args.num_levels} FPN levels...")
     level_anchors = assign_to_fpn_levels(centroids, num_levels=args.num_levels)
 
     # Step 4: Print results
-    print_anchor_results(
-        centroids, avg_iou, args.img_size, level_anchors, dataset=args.dataset
-    )
+    print_anchor_results(centroids, avg_iou, args.img_size, level_anchors)
 
     # Step 5: Cluster size distribution
-    print("\nCluster sizes:")
+    print(f"\nCluster sizes:")
     for j in range(args.num_anchors):
         count = np.sum(assignments == j)
-        print(
-            f"  Cluster {j:2d}: {count:>6d} boxes ({count / len(assignments) * 100:.1f}%)"
-        )
+        print(f"  Cluster {j:2d}: {count:>6d} boxes ({count / len(assignments) * 100:.1f}%)")
 
     print(f"\n{'=' * 60}")
     print(f"Average IoU with anchors: {avg_iou:.4f}")

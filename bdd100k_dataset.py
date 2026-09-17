@@ -13,53 +13,54 @@ import random
 from collections import defaultdict
 
 BDD100K_CLASSES = [
-    "pedestrian",
-    "rider",
-    "car",
-    "truck",
+    "bike",
     "bus",
-    "train",
-    "motorcycle",
-    "bicycle",
+    "car",
+    "motor",
+    "person",
+    "rider",
     "traffic light",
     "traffic sign",
+    "train",
+    "truck",
 ]
 
 BDD100K_CAT_IDS = list(range(1, 11))
 BDD100K_CAT_TO_IDX = {cat_id: cat_id for cat_id in BDD100K_CAT_IDS}
 
 
-def filter_and_clip_boxes(boxes, img_w, img_h, labels, masks, iscrowd):
-    """Clip boxes to image size, and filter out invalid boxes (width <= 0 or height <= 0).
-
-    Also filters corresponding labels, masks, and iscrowd arrays.
-    """
+def filter_and_clip_boxes(boxes, img_w, img_h, labels, iscrowd, masks=None):
+    """Clip boxes to image size, and filter out invalid boxes (width <= 0 or height <= 0)."""
     if len(boxes) == 0:
-        return boxes, labels, masks, iscrowd
+        if masks is not None:
+            return boxes, labels, iscrowd, masks
+        return boxes, labels, iscrowd
 
-    # Clip coordinates to [0, img_w] and [0, img_h]
     boxes = boxes.copy()
     boxes[:, 0] = np.clip(boxes[:, 0], 0, img_w)
     boxes[:, 1] = np.clip(boxes[:, 1], 0, img_h)
     boxes[:, 2] = np.clip(boxes[:, 2], 0, img_w)
     boxes[:, 3] = np.clip(boxes[:, 3], 0, img_h)
 
-    # Filter out boxes with width <= 0 or height <= 0
     valid_mask = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
 
     boxes = boxes[valid_mask]
     labels = labels[valid_mask]
-    if len(masks) > 0:
-        masks = masks[valid_mask]
     iscrowd = iscrowd[valid_mask]
+    if masks is not None and len(masks) > 0:
+        masks = masks[valid_mask]
+        return boxes, labels, iscrowd, masks
 
-    return boxes, labels, masks, iscrowd
+    if masks is not None:
+        return boxes, labels, iscrowd, masks
+    return boxes, labels, iscrowd
 
 
 class BDD100KDetectionDataset(Dataset):
     """BDD100K Detection Dataset using pure Python JSON parser.
 
     Annotations are converted from COCO JSON to [x1, y1, x2, y2] format.
+    Optimized for bounding-box detection (no segmentation mask overhead).
     """
 
     def __init__(
@@ -69,6 +70,7 @@ class BDD100KDetectionDataset(Dataset):
         img_size=512,
         augment=True,
         cache_ram=False,
+        load_masks=False,
     ):
         """
         Args:
@@ -77,11 +79,12 @@ class BDD100KDetectionDataset(Dataset):
             img_size: Target image size (square).
             augment: Apply data augmentation.
             cache_ram: Preload dataset to RAM.
+            load_masks: Whether to load segmentation masks (default: False).
         """
         self.img_dir = img_dir
         self.img_size = img_size
         self.augment = augment
-        self.load_masks = False
+        self.load_masks = load_masks
 
         # ImageNet normalization
         self.mean = [0.485, 0.456, 0.406]
@@ -122,32 +125,35 @@ class BDD100KDetectionDataset(Dataset):
                 img_info = self.images[img_id]
                 file_name = img_info["file_name"]
                 img_path = os.path.join(self.img_dir, file_name)
+                if not os.path.exists(img_path):
+                    base_name = os.path.basename(file_name)
+                    for folder in ["train", "val"]:
+                        test_path = os.path.join(self.img_dir, folder, base_name)
+                        if os.path.exists(test_path):
+                            img_path = test_path
+                            break
+
                 with open(img_path, "rb") as f:
-                    img_bytes = f.read()
-                self.cached_images.append(img_bytes)
+                    self.cached_images.append(f.read())
 
-                boxes, labels, iscrowd, masks = self._get_annotations(
-                    img_id, img_h=img_info["height"], img_w=img_info["width"]
+                boxes, labels, iscrowd = self._get_annotations(
+                    img_id, img_info["height"], img_info["width"]
                 )
-                self.cached_annotations.append((boxes, labels, iscrowd, masks))
-
-    def __len__(self):
-        return len(self.img_ids)
+                self.cached_annotations.append((boxes, labels, iscrowd))
+            print("Caching to RAM completed successfully!")
 
     def _get_annotations(self, img_id, img_h, img_w):
-        """Retrieve annotations for a given image ID.
+        """Parse annotations for an image.
 
         Returns:
             boxes:     list of [x1, y1, x2, y2]
             labels:    list of class indices (1-indexed)
             iscrowd:   list of ints (0 or 1)
-            masks:     list of empty binary np.ndarray (H, W) uint8 placeholder
         """
         anns = self.img_to_anns[img_id]
         boxes = []
         labels = []
         iscrowd = []
-        masks = []
 
         for ann in anns:
             cat_id = ann["category_id"]
@@ -176,10 +182,11 @@ class BDD100KDetectionDataset(Dataset):
                 boxes.append([x1, y1, x2, y2])
                 labels.append(BDD100K_CAT_TO_IDX[cat_id])
                 iscrowd.append(int(ann.get("iscrowd", 0)))
-                # Bdd100k detection only uses bbox, so use a 1x1 placeholder
-                masks.append(np.zeros((1, 1), dtype=np.uint8))
 
-        return boxes, labels, iscrowd, masks
+        return boxes, labels, iscrowd
+
+    def __len__(self):
+        return len(self.img_ids)
 
     def __getitem__(self, idx):
         if self.cache_ram:
@@ -187,7 +194,7 @@ class BDD100KDetectionDataset(Dataset):
 
             img_bytes = self.cached_images[idx]
             image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            boxes, labels, iscrowd, masks = self.cached_annotations[idx]
+            boxes, labels, iscrowd = self.cached_annotations[idx]
             orig_w, orig_h = image.size
         else:
             img_id = self.img_ids[idx]
@@ -195,7 +202,6 @@ class BDD100KDetectionDataset(Dataset):
             file_name = img_info["file_name"]
             img_path = os.path.join(self.img_dir, file_name)
             if not os.path.exists(img_path):
-                # Fallback search
                 base_name = os.path.basename(file_name)
                 for folder in ["train", "val"]:
                     test_path = os.path.join(self.img_dir, folder, base_name)
@@ -203,12 +209,9 @@ class BDD100KDetectionDataset(Dataset):
                         img_path = test_path
                         break
 
-            # Load image
             image = Image.open(img_path).convert("RGB")
             orig_w, orig_h = image.size
-
-            # Get annotations
-            boxes, labels, iscrowd, masks = self._get_annotations(
+            boxes, labels, iscrowd = self._get_annotations(
                 img_id, img_h=orig_h, img_w=orig_w
             )
 
@@ -216,12 +219,10 @@ class BDD100KDetectionDataset(Dataset):
             boxes = np.zeros((0, 4), dtype=np.float32)
             labels = np.array([], dtype=np.int64)
             iscrowd = np.array([], dtype=np.int64)
-            masks = np.zeros((0, orig_h, orig_w), dtype=np.uint8)
         else:
             boxes = np.array(boxes, dtype=np.float32)
             labels = np.array(labels, dtype=np.int64)
             iscrowd = np.array(iscrowd, dtype=np.int64)
-            masks = np.stack(masks, axis=0)  # (N, H, W)
 
         if self.augment:
             easy_mask = iscrowd == 0
@@ -233,40 +234,26 @@ class BDD100KDetectionDataset(Dataset):
             train_labels = (
                 labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
             )
-            train_masks = (
-                masks[easy_mask]
-                if easy_mask.any()
-                else np.zeros((0, orig_h, orig_w), dtype=np.uint8)
-            )
             train_iscrowd = (
                 iscrowd[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
             )
 
             if len(train_boxes) > 0:
-                image, train_boxes, train_masks, train_labels, train_iscrowd = (
-                    self._augment(
-                        image, train_boxes, train_masks, train_labels, train_iscrowd
-                    )
+                image, train_boxes, train_labels, train_iscrowd = self._augment(
+                    image, train_boxes, train_labels, train_iscrowd
                 )
-                train_boxes, train_labels, train_masks, train_iscrowd = (
-                    filter_and_clip_boxes(
-                        train_boxes,
-                        image.size[0],
-                        image.size[1],
-                        train_labels,
-                        train_masks,
-                        train_iscrowd,
-                    )
+                train_boxes, train_labels, train_iscrowd = filter_and_clip_boxes(
+                    train_boxes,
+                    image.size[0],
+                    image.size[1],
+                    train_labels,
+                    train_iscrowd,
                 )
 
-            image, train_boxes, train_masks = self._resize(
-                image, train_boxes, self.img_size, train_masks
-            )
+            image, train_boxes = self._resize(image, train_boxes, self.img_size)
             new_w, new_h = image.size
-            train_boxes, train_labels, train_masks, train_iscrowd = (
-                filter_and_clip_boxes(
-                    train_boxes, new_w, new_h, train_labels, train_masks, train_iscrowd
-                )
+            train_boxes, train_labels, train_iscrowd = filter_and_clip_boxes(
+                train_boxes, new_w, new_h, train_labels, train_iscrowd
             )
 
             image = TF.to_tensor(image)
@@ -279,16 +266,16 @@ class BDD100KDetectionDataset(Dataset):
             targets = {
                 "boxes": torch.tensor(train_boxes, dtype=torch.float32),
                 "labels": torch.tensor(train_labels, dtype=torch.int64),
-                "masks": torch.tensor(train_masks, dtype=torch.bool),
                 "area": torch.tensor(areas, dtype=torch.float32),
                 "iscrowd": torch.tensor(train_iscrowd, dtype=torch.int64),
             }
+            if self.load_masks:
+                targets["masks"] = torch.zeros((len(train_boxes), 1, 1), dtype=torch.bool)
         else:
             image, boxes = self._resize(image, boxes, self.img_size)
-            masks = np.zeros((len(boxes), 1, 1), dtype=np.uint8)
             new_w, new_h = image.size
-            boxes, labels, masks, iscrowd = filter_and_clip_boxes(
-                boxes, new_w, new_h, labels, masks, iscrowd
+            boxes, labels, iscrowd = filter_and_clip_boxes(
+                boxes, new_w, new_h, labels, iscrowd
             )
 
             image = TF.to_tensor(image)
@@ -299,15 +286,16 @@ class BDD100KDetectionDataset(Dataset):
             targets = {
                 "boxes": torch.tensor(boxes, dtype=torch.float32),
                 "labels": torch.tensor(labels, dtype=torch.int64),
-                "masks": torch.tensor(masks, dtype=torch.bool),
                 "area": torch.tensor(areas, dtype=torch.float32),
                 "iscrowd": torch.tensor(iscrowd, dtype=torch.int64),
                 "difficults": torch.tensor(iscrowd == 1, dtype=torch.bool),
             }
+            if self.load_masks:
+                targets["masks"] = torch.zeros((len(boxes), 1, 1), dtype=torch.bool)
 
         return image, targets
 
-    def _augment(self, image, boxes, masks, labels, iscrowd):
+    def _augment(self, image, boxes, labels, iscrowd):
         w, h = image.size
 
         if random.random() > 0.5:
@@ -316,8 +304,6 @@ class BDD100KDetectionDataset(Dataset):
             new_boxes[:, 0] = w - boxes[:, 2]
             new_boxes[:, 2] = w - boxes[:, 0]
             boxes = new_boxes
-            if len(masks) > 0:
-                masks = masks[:, :, ::-1].copy()
 
         if random.random() > 0.5:
             image = TF.adjust_brightness(image, random.uniform(0.8, 1.2))
@@ -349,22 +335,17 @@ class BDD100KDetectionDataset(Dataset):
             boxes[:, 2] += left
             boxes[:, 3] += top
 
-            if len(masks) > 0:
-                new_masks = np.zeros((masks.shape[0], new_h, new_w), dtype=masks.dtype)
-                new_masks[:, top : top + h, left : left + w] = masks
-                masks = new_masks
-
         if random.random() > 0.5:
-            image, boxes, masks, labels, iscrowd = self._random_crop(
-                image, boxes, masks, labels, iscrowd
+            image, boxes, labels, iscrowd = self._random_crop(
+                image, boxes, labels, iscrowd
             )
 
-        return image, boxes, masks, labels, iscrowd
+        return image, boxes, labels, iscrowd
 
-    def _random_crop(self, image, boxes, masks, labels, iscrowd):
+    def _random_crop(self, image, boxes, labels, iscrowd):
         w, h = image.size
         if len(boxes) == 0:
-            return image, boxes, masks, labels, iscrowd
+            return image, boxes, labels, iscrowd
 
         for _ in range(50):
             scale = random.uniform(0.5, 1.0)
@@ -388,12 +369,6 @@ class BDD100KDetectionDataset(Dataset):
             new_boxes[:, 2] = np.clip(new_boxes[:, 2] - left, 0, crop_w)
             new_boxes[:, 3] = np.clip(new_boxes[:, 3] - top, 0, crop_h)
 
-            new_masks = (
-                masks[keep, top:bottom, left:right].copy()
-                if len(masks) > 0
-                else masks[keep]
-            )
-
             new_labels = labels[keep]
             new_iscrowd = iscrowd[keep]
 
@@ -405,14 +380,13 @@ class BDD100KDetectionDataset(Dataset):
                 return (
                     cropped_image,
                     new_boxes[valid],
-                    new_masks[valid],
                     new_labels[valid],
                     new_iscrowd[valid],
                 )
 
-        return image, boxes, masks, labels, iscrowd
+        return image, boxes, labels, iscrowd
 
-    def _resize(self, image, boxes, target_size, masks=None, max_size=1333):
+    def _resize(self, image, boxes, target_size, max_size=1333):
         orig_w, orig_h = image.size
 
         min_side = min(orig_w, orig_h)
@@ -436,18 +410,6 @@ class BDD100KDetectionDataset(Dataset):
             boxes[:, 2] *= scale_x
             boxes[:, 3] *= scale_y
 
-        if masks is not None:
-            if len(masks) > 0:
-                resized = np.zeros((masks.shape[0], new_h, new_w), dtype=masks.dtype)
-                for i, m in enumerate(masks):
-                    pil_m = Image.fromarray(m).resize((new_w, new_h), Image.NEAREST)
-                    resized[i] = np.array(pil_m, dtype=masks.dtype)
-                masks = resized
-            else:
-                masks = np.zeros((0, new_h, new_w), dtype=masks.dtype)
-
-        if masks is not None:
-            return image, boxes, masks
         return image, boxes
 
 
@@ -485,21 +447,49 @@ def build_bdd100k_datasets(
     train_ann_file=None,
     val_img_dir=None,
     val_ann_file=None,
+    weather=None,
     cache_ram=False,
+    train_load_masks=False,
+    val_load_masks=False,
 ):
+    if weather is not None:
+        weather_clean = weather.strip().lower().replace(" ", "_")
+        if train_ann_file is None:
+            w_train_ann = os.path.join(data_dir, "annotations", "weather", f"coco_train_{weather_clean}.json")
+            if os.path.exists(w_train_ann):
+                train_ann_file = w_train_ann
+        if val_ann_file is None:
+            w_val_ann = os.path.join(data_dir, "annotations", "weather", f"coco_val_{weather_clean}.json")
+            if os.path.exists(w_val_ann):
+                val_ann_file = w_val_ann
     """Build train and validation BDD100K datasets."""
     if train_img_dir is None:
-        train_img_dir = os.path.join(data_dir, "images", "100k", "train")
+        train_img_dir = os.path.join(data_dir, "train", "images")
+        if not os.path.exists(train_img_dir):
+            train_img_dir = os.path.join(data_dir, "images", "100k", "train")
+
     if train_ann_file is None:
         train_ann_file = os.path.join(
-            data_dir, "annotations", "bdd100k_det_train_coco.json"
+            data_dir, "train", "annotations", "coco_instances_train.json"
         )
+        if not os.path.exists(train_ann_file):
+            train_ann_file = os.path.join(
+                data_dir, "annotations", "bdd100k_det_train_coco.json"
+            )
+
     if val_img_dir is None:
-        val_img_dir = os.path.join(data_dir, "images", "100k", "val")
+        val_img_dir = os.path.join(data_dir, "val", "images")
+        if not os.path.exists(val_img_dir):
+            val_img_dir = os.path.join(data_dir, "images", "100k", "val")
+
     if val_ann_file is None:
         val_ann_file = os.path.join(
-            data_dir, "annotations", "bdd100k_det_val_coco.json"
+            data_dir, "val", "annotations", "coco_instances_val.json"
         )
+        if not os.path.exists(val_ann_file):
+            val_ann_file = os.path.join(
+                data_dir, "annotations", "bdd100k_det_val_coco.json"
+            )
 
     train_dataset = BDD100KDetectionDataset(
         img_dir=train_img_dir,
@@ -507,6 +497,7 @@ def build_bdd100k_datasets(
         img_size=img_size,
         augment=True,
         cache_ram=cache_ram,
+        load_masks=train_load_masks,
     )
 
     val_dataset = BDD100KDetectionDataset(
@@ -515,6 +506,7 @@ def build_bdd100k_datasets(
         img_size=img_size,
         augment=False,
         cache_ram=cache_ram,
+        load_masks=val_load_masks,
     )
 
     return train_dataset, val_dataset

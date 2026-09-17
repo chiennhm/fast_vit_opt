@@ -399,7 +399,7 @@ class FastViTDetector(nn.Module):
         num_classes: int = 20,
         fpn_channels: int = 256,
         pretrained_backbone: str = None,
-        anchor_sizes: Tuple[int, ...] = (16, 32, 64, 128, 256),
+        anchor_sizes: Tuple[int, ...] = (11, 19, 28, 51, 153),
         anchor_ratios: Tuple[float, ...] = (0.5, 1.0, 2.0),
         anchor_scales: Tuple[float, ...] = (1.0, 2 ** (1.0 / 3), 2 ** (2.0 / 3)),
         inference_mode: bool = False,
@@ -545,6 +545,9 @@ class FastViTDetector(nn.Module):
                 continue
 
             scores = scores[candidate_mask]  # (K, C)
+            box_deltas = box_deltas[candidate_mask]  # (K, 4)
+            cand_anchors = anchors[candidate_mask]  # (K, 4)
+
             if use_dfl:
                 a_cx = (cand_anchors[:, 0] + cand_anchors[:, 2]) / 2
                 a_cy = (cand_anchors[:, 1] + cand_anchors[:, 3]) / 2

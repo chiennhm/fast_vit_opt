@@ -454,43 +454,70 @@ class COCODetectionDataset(Dataset):
             train_labels = (
                 labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
             )
-            train_masks = (
-                masks[easy_mask]
-                if easy_mask.any()
-                else np.zeros((0, orig_h, orig_w), dtype=np.uint8)
-            )
             train_iscrowd = (
                 iscrowd[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
             )
 
-            if len(train_boxes) > 0:
-                image, train_boxes, train_masks, train_labels, train_iscrowd = (
-                    self._augment(
-                        image, train_boxes, train_masks, train_labels, train_iscrowd
-                    )
+            if self.load_masks:
+                train_masks = (
+                    masks[easy_mask]
+                    if easy_mask.any()
+                    else np.zeros((0, orig_h, orig_w), dtype=np.uint8)
                 )
-                # Filter invalid boxes after _augment
+                if len(train_boxes) > 0:
+                    image, train_boxes, train_masks, train_labels, train_iscrowd = (
+                        self._augment(
+                            image, train_boxes, train_masks, train_labels, train_iscrowd
+                        )
+                    )
+                    train_boxes, train_labels, train_masks, train_iscrowd = (
+                        filter_and_clip_boxes(
+                            train_boxes,
+                            image.size[0],
+                            image.size[1],
+                            train_labels,
+                            train_masks,
+                            train_iscrowd,
+                        )
+                    )
+
+                image, train_boxes, train_masks = self._resize(
+                    image, train_boxes, self.img_size, train_masks
+                )
+                new_w, new_h = image.size
                 train_boxes, train_labels, train_masks, train_iscrowd = (
                     filter_and_clip_boxes(
-                        train_boxes,
-                        image.size[0],
-                        image.size[1],
-                        train_labels,
-                        train_masks,
-                        train_iscrowd,
+                        train_boxes, new_w, new_h, train_labels, train_masks, train_iscrowd
                     )
                 )
+            else:
+                train_masks = None
+                if len(train_boxes) > 0:
+                    image, train_boxes, _, train_labels, train_iscrowd = (
+                        self._augment(
+                            image, train_boxes, [], train_labels, train_iscrowd
+                        )
+                    )
+                    train_boxes, train_labels, _, train_iscrowd = (
+                        filter_and_clip_boxes(
+                            train_boxes,
+                            image.size[0],
+                            image.size[1],
+                            train_labels,
+                            [],
+                            train_iscrowd,
+                        )
+                    )
 
-            image, train_boxes, train_masks = self._resize(
-                image, train_boxes, self.img_size, train_masks
-            )
-            # Filter invalid boxes after _resize
-            new_w, new_h = image.size
-            train_boxes, train_labels, train_masks, train_iscrowd = (
-                filter_and_clip_boxes(
-                    train_boxes, new_w, new_h, train_labels, train_masks, train_iscrowd
+                image, train_boxes = self._resize(
+                    image, train_boxes, self.img_size
                 )
-            )
+                new_w, new_h = image.size
+                train_boxes, train_labels, _, train_iscrowd = (
+                    filter_and_clip_boxes(
+                        train_boxes, new_w, new_h, train_labels, [], train_iscrowd
+                    )
+                )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
@@ -503,11 +530,11 @@ class COCODetectionDataset(Dataset):
             targets = {
                 "boxes": torch.tensor(train_boxes, dtype=torch.float32),
                 "labels": torch.tensor(train_labels, dtype=torch.int64),
-                # torchvision MaskRCNN expects BoolTensor masks (N, H, W)
-                "masks": torch.tensor(train_masks, dtype=torch.bool),
                 "area": torch.tensor(areas, dtype=torch.float32),
                 "iscrowd": torch.tensor(train_iscrowd, dtype=torch.int64),
             }
+            if self.load_masks and train_masks is not None:
+                targets["masks"] = torch.tensor(train_masks, dtype=torch.bool)
         else:
             # Eval: keep all
             if self.load_masks:
@@ -746,6 +773,7 @@ def build_coco_datasets(
     val_img_dir=None,
     val_ann_file=None,
     cache_ram=False,
+    train_load_masks=False,
     val_load_masks=False,
 ):
     """Build train and validation COCO datasets.
@@ -787,6 +815,7 @@ def build_coco_datasets(
         img_size=img_size,
         augment=True,
         cache_ram=cache_ram,
+        load_masks=train_load_masks,
     )
 
     val_dataset = COCODetectionDataset(
