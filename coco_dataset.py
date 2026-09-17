@@ -15,26 +15,176 @@ from collections import defaultdict
 # pycocotools is optional — used only for RLE mask decoding.
 try:
     from pycocotools import mask as coco_mask_utils
+
     HAS_PYCOCOTOOLS = True
 except ImportError:
     HAS_PYCOCOTOOLS = False
 
 
 COCO_CLASSES = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
-    "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
-    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed",
-    "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven",
-    "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ]
 
 COCO_CAT_IDS = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 31, 32, 33, 34,
-    35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
-    64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84, 85, 86, 87, 88, 89, 90
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    27,
+    28,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    67,
+    70,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89,
+    90,
 ]
 
 COCO_CAT_TO_IDX = {cat_id: i + 1 for i, cat_id in enumerate(COCO_CAT_IDS)}
@@ -119,7 +269,9 @@ class COCODetectionDataset(Dataset):
                 self.img_to_anns[ann["image_id"]].append(ann)
 
         self.img_ids = list(self.images.keys())
-        print(f"COCO Dataset: {len(self.img_ids)} images, {len(coco_data['annotations'])} annotations loaded")
+        print(
+            f"COCO Dataset: {len(self.img_ids)} images, {len(coco_data['annotations'])} annotations loaded"
+        )
 
         self.cache_ram = cache_ram
         if self.cache_ram:
@@ -128,7 +280,11 @@ class COCODetectionDataset(Dataset):
             self.cached_annotations = []
             try:
                 from tqdm import tqdm
-                pbar = tqdm(self.img_ids, desc=f"Caching COCO {'train' if augment else 'val'} to RAM")
+
+                pbar = tqdm(
+                    self.img_ids,
+                    desc=f"Caching COCO {'train' if augment else 'val'} to RAM",
+                )
             except ImportError:
                 pbar = self.img_ids
 
@@ -171,6 +327,7 @@ class COCODetectionDataset(Dataset):
         if isinstance(seg, list):
             # Polygon format — rasterise with PIL ImageDraw (no cv2 dependency)
             from PIL import ImageDraw
+
             mask = np.zeros((img_h, img_w), dtype=np.uint8)
             m_img = Image.fromarray(mask)
             draw = ImageDraw.Draw(m_img)
@@ -184,9 +341,7 @@ class COCODetectionDataset(Dataset):
         # RLE format (dict with 'counts' and 'size')
         if isinstance(seg, dict):
             if HAS_PYCOCOTOOLS:
-                rle = coco_mask_utils.frPyObjects(
-                    seg, seg["size"][0], seg["size"][1]
-                )
+                rle = coco_mask_utils.frPyObjects(seg, seg["size"][0], seg["size"][1])
                 return coco_mask_utils.decode(rle).astype(np.uint8)
             else:
                 # Fallback: bbox mask
@@ -257,6 +412,7 @@ class COCODetectionDataset(Dataset):
     def __getitem__(self, idx):
         if self.cache_ram:
             import io
+
             img_bytes = self.cached_images[idx]
             image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             boxes, labels, iscrowd, masks = self.cached_annotations[idx]
@@ -277,62 +433,112 @@ class COCODetectionDataset(Dataset):
             )
 
         if len(boxes) == 0:
-            boxes      = np.zeros((0, 4),         dtype=np.float32)
-            labels     = np.array([],             dtype=np.int64)
-            iscrowd    = np.array([],             dtype=np.int64)
-            masks      = np.zeros((0, orig_h, orig_w), dtype=np.uint8)
+            boxes = np.zeros((0, 4), dtype=np.float32)
+            labels = np.array([], dtype=np.int64)
+            iscrowd = np.array([], dtype=np.int64)
+            masks = np.zeros((0, orig_h, orig_w), dtype=np.uint8)
         else:
-            boxes      = np.array(boxes,      dtype=np.float32)
-            labels     = np.array(labels,     dtype=np.int64)
-            iscrowd    = np.array(iscrowd,    dtype=np.int64)
-            masks      = np.stack(masks, axis=0)  # (N, H, W)
+            boxes = np.array(boxes, dtype=np.float32)
+            labels = np.array(labels, dtype=np.int64)
+            iscrowd = np.array(iscrowd, dtype=np.int64)
+            masks = np.stack(masks, axis=0)  # (N, H, W)
 
         if self.augment:
             # Training: exclude iscrowd objects (iscrowd == 1)
-            easy_mask    = iscrowd == 0
-            train_boxes  = boxes[easy_mask]  if easy_mask.any() else np.zeros((0, 4), dtype=np.float32)
-            train_labels = labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
-            train_masks  = masks[easy_mask]  if easy_mask.any() else np.zeros((0, orig_h, orig_w), dtype=np.uint8)
-            train_iscrowd = iscrowd[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
-
-            if len(train_boxes) > 0:
-                image, train_boxes, train_masks, train_labels, train_iscrowd = self._augment(
-                    image, train_boxes, train_masks, train_labels, train_iscrowd
-                )
-                # Filter invalid boxes after _augment
-                train_boxes, train_labels, train_masks, train_iscrowd = filter_and_clip_boxes(
-                    train_boxes, image.size[0], image.size[1], train_labels, train_masks, train_iscrowd
-                )
-
-            image, train_boxes, train_masks = self._resize(
-                image, train_boxes, self.img_size, train_masks
+            easy_mask = iscrowd == 0
+            train_boxes = (
+                boxes[easy_mask]
+                if easy_mask.any()
+                else np.zeros((0, 4), dtype=np.float32)
             )
-            # Filter invalid boxes after _resize
-            new_w, new_h = image.size
-            train_boxes, train_labels, train_masks, train_iscrowd = filter_and_clip_boxes(
-                train_boxes, new_w, new_h, train_labels, train_masks, train_iscrowd
+            train_labels = (
+                labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
             )
+            train_iscrowd = (
+                iscrowd[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
+            )
+
+            if self.load_masks:
+                train_masks = (
+                    masks[easy_mask]
+                    if easy_mask.any()
+                    else np.zeros((0, orig_h, orig_w), dtype=np.uint8)
+                )
+                if len(train_boxes) > 0:
+                    image, train_boxes, train_masks, train_labels, train_iscrowd = (
+                        self._augment(
+                            image, train_boxes, train_masks, train_labels, train_iscrowd
+                        )
+                    )
+                    train_boxes, train_labels, train_masks, train_iscrowd = (
+                        filter_and_clip_boxes(
+                            train_boxes,
+                            image.size[0],
+                            image.size[1],
+                            train_labels,
+                            train_masks,
+                            train_iscrowd,
+                        )
+                    )
+
+                image, train_boxes, train_masks = self._resize(
+                    image, train_boxes, self.img_size, train_masks
+                )
+                new_w, new_h = image.size
+                train_boxes, train_labels, train_masks, train_iscrowd = (
+                    filter_and_clip_boxes(
+                        train_boxes, new_w, new_h, train_labels, train_masks, train_iscrowd
+                    )
+                )
+            else:
+                train_masks = None
+                if len(train_boxes) > 0:
+                    image, train_boxes, _, train_labels, train_iscrowd = (
+                        self._augment(
+                            image, train_boxes, [], train_labels, train_iscrowd
+                        )
+                    )
+                    train_boxes, train_labels, _, train_iscrowd = (
+                        filter_and_clip_boxes(
+                            train_boxes,
+                            image.size[0],
+                            image.size[1],
+                            train_labels,
+                            [],
+                            train_iscrowd,
+                        )
+                    )
+
+                image, train_boxes = self._resize(
+                    image, train_boxes, self.img_size
+                )
+                new_w, new_h = image.size
+                train_boxes, train_labels, _, train_iscrowd = (
+                    filter_and_clip_boxes(
+                        train_boxes, new_w, new_h, train_labels, [], train_iscrowd
+                    )
+                )
 
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
 
             # Calculate areas of filtered boxes
-            areas = (train_boxes[:, 2] - train_boxes[:, 0]) * (train_boxes[:, 3] - train_boxes[:, 1])
+            areas = (train_boxes[:, 2] - train_boxes[:, 0]) * (
+                train_boxes[:, 3] - train_boxes[:, 1]
+            )
 
             targets = {
-                "boxes":  torch.tensor(train_boxes,  dtype=torch.float32),
+                "boxes": torch.tensor(train_boxes, dtype=torch.float32),
                 "labels": torch.tensor(train_labels, dtype=torch.int64),
-                # torchvision MaskRCNN expects BoolTensor masks (N, H, W)
-                "masks":  torch.tensor(train_masks,  dtype=torch.bool),
-                "area":   torch.tensor(areas,        dtype=torch.float32),
+                "area": torch.tensor(areas, dtype=torch.float32),
                 "iscrowd": torch.tensor(train_iscrowd, dtype=torch.int64),
             }
+            if self.load_masks and train_masks is not None:
+                targets["masks"] = torch.tensor(train_masks, dtype=torch.bool)
         else:
             # Eval: keep all
             if self.load_masks:
-                image, boxes, masks = self._resize(
-                    image, boxes, self.img_size, masks
-                )
+                image, boxes, masks = self._resize(image, boxes, self.img_size, masks)
             else:
                 # Bbox-only eval: don't resize masks to full image
                 # resolution (that's the expensive part). Resize image/boxes
@@ -352,11 +558,11 @@ class COCODetectionDataset(Dataset):
             areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
 
             targets = {
-                "boxes":      torch.tensor(boxes,      dtype=torch.float32),
-                "labels":     torch.tensor(labels,     dtype=torch.int64),
-                "masks":      torch.tensor(masks,      dtype=torch.bool),
-                "area":       torch.tensor(areas,      dtype=torch.float32),
-                "iscrowd":    torch.tensor(iscrowd,    dtype=torch.int64),
+                "boxes": torch.tensor(boxes, dtype=torch.float32),
+                "labels": torch.tensor(labels, dtype=torch.int64),
+                "masks": torch.tensor(masks, dtype=torch.bool),
+                "area": torch.tensor(areas, dtype=torch.float32),
+                "iscrowd": torch.tensor(iscrowd, dtype=torch.int64),
                 "difficults": torch.tensor(iscrowd == 1, dtype=torch.bool),
             }
 
@@ -392,10 +598,13 @@ class COCODetectionDataset(Dataset):
             new_w = int(w * ratio)
             new_h = int(h * ratio)
             left = random.randint(0, new_w - w)
-            top  = random.randint(0, new_h - h)
+            top = random.randint(0, new_h - h)
 
-            expanded = Image.new("RGB", (new_w, new_h),
-                                  (int(0.485 * 255), int(0.456 * 255), int(0.406 * 255)))
+            expanded = Image.new(
+                "RGB",
+                (new_w, new_h),
+                (int(0.485 * 255), int(0.456 * 255), int(0.406 * 255)),
+            )
             expanded.paste(image, (left, top))
             image = expanded
 
@@ -406,15 +615,15 @@ class COCODetectionDataset(Dataset):
             boxes[:, 3] += top
 
             if len(masks) > 0:
-                new_masks = np.zeros(
-                    (masks.shape[0], new_h, new_w), dtype=masks.dtype
-                )
-                new_masks[:, top:top + h, left:left + w] = masks
+                new_masks = np.zeros((masks.shape[0], new_h, new_w), dtype=masks.dtype)
+                new_masks[:, top : top + h, left : left + w] = masks
                 masks = new_masks
 
         # Random crop (IoU-aware)
         if random.random() > 0.5:
-            image, boxes, masks, labels, iscrowd = self._random_crop(image, boxes, masks, labels, iscrowd)
+            image, boxes, masks, labels, iscrowd = self._random_crop(
+                image, boxes, masks, labels, iscrowd
+            )
 
         return image, boxes, masks, labels, iscrowd
 
@@ -425,12 +634,12 @@ class COCODetectionDataset(Dataset):
             return image, boxes, masks, labels, iscrowd
 
         for _ in range(50):  # Max attempts
-            scale  = random.uniform(0.5, 1.0)
+            scale = random.uniform(0.5, 1.0)
             crop_h = int(h * scale)
             crop_w = int(w * scale)
-            left   = random.randint(0, max(w - crop_w, 0))
-            top    = random.randint(0, max(h - crop_h, 0))
-            right  = left + crop_w
+            left = random.randint(0, max(w - crop_w, 0))
+            top = random.randint(0, max(h - crop_h, 0))
+            right = left + crop_w
             bottom = top + crop_h
 
             # Check if any box center is inside crop
@@ -444,23 +653,33 @@ class COCODetectionDataset(Dataset):
             # Adjust boxes
             new_boxes = boxes[keep].copy()
             new_boxes[:, 0] = np.clip(new_boxes[:, 0] - left, 0, crop_w)
-            new_boxes[:, 1] = np.clip(new_boxes[:, 1] - top,  0, crop_h)
+            new_boxes[:, 1] = np.clip(new_boxes[:, 1] - top, 0, crop_h)
             new_boxes[:, 2] = np.clip(new_boxes[:, 2] - left, 0, crop_w)
-            new_boxes[:, 3] = np.clip(new_boxes[:, 3] - top,  0, crop_h)
+            new_boxes[:, 3] = np.clip(new_boxes[:, 3] - top, 0, crop_h)
 
             # Crop masks
-            new_masks = masks[keep, top:bottom, left:right].copy() \
-                if len(masks) > 0 else masks[keep]
+            new_masks = (
+                masks[keep, top:bottom, left:right].copy()
+                if len(masks) > 0
+                else masks[keep]
+            )
 
             new_labels = labels[keep]
             new_iscrowd = iscrowd[keep]
 
             # Filter tiny boxes
-            valid = ((new_boxes[:, 2] - new_boxes[:, 0]) > 5) & \
-                    ((new_boxes[:, 3] - new_boxes[:, 1]) > 5)
+            valid = ((new_boxes[:, 2] - new_boxes[:, 0]) > 5) & (
+                (new_boxes[:, 3] - new_boxes[:, 1]) > 5
+            )
             if valid.any():
                 cropped_image = image.crop((left, top, right, bottom))
-                return cropped_image, new_boxes[valid], new_masks[valid], new_labels[valid], new_iscrowd[valid]
+                return (
+                    cropped_image,
+                    new_boxes[valid],
+                    new_masks[valid],
+                    new_labels[valid],
+                    new_iscrowd[valid],
+                )
 
         return image, boxes, masks, labels, iscrowd
 
@@ -499,13 +718,9 @@ class COCODetectionDataset(Dataset):
         if masks is not None:
             if len(masks) > 0:
                 # Resize each mask using nearest-neighbour to preserve binary values
-                resized = np.zeros(
-                    (masks.shape[0], new_h, new_w), dtype=masks.dtype
-                )
+                resized = np.zeros((masks.shape[0], new_h, new_w), dtype=masks.dtype)
                 for i, m in enumerate(masks):
-                    pil_m = Image.fromarray(m).resize(
-                        (new_w, new_h), Image.NEAREST
-                    )
+                    pil_m = Image.fromarray(m).resize((new_w, new_h), Image.NEAREST)
                     resized[i] = np.array(pil_m, dtype=masks.dtype)
                 masks = resized
             else:
@@ -558,6 +773,7 @@ def build_coco_datasets(
     val_img_dir=None,
     val_ann_file=None,
     cache_ram=False,
+    train_load_masks=False,
     val_load_masks=False,
 ):
     """Build train and validation COCO datasets.
@@ -585,7 +801,9 @@ def build_coco_datasets(
     if train_img_dir is None:
         train_img_dir = os.path.join(data_dir, "train2017")
     if train_ann_file is None:
-        train_ann_file = os.path.join(data_dir, "annotations", "instances_train2017.json")
+        train_ann_file = os.path.join(
+            data_dir, "annotations", "instances_train2017.json"
+        )
     if val_img_dir is None:
         val_img_dir = os.path.join(data_dir, "val2017")
     if val_ann_file is None:
@@ -597,6 +815,7 @@ def build_coco_datasets(
         img_size=img_size,
         augment=True,
         cache_ram=cache_ram,
+        load_masks=train_load_masks,
     )
 
     val_dataset = COCODetectionDataset(

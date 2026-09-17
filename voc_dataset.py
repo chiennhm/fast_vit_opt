@@ -2,10 +2,9 @@
 # PASCAL VOC Dataset for Object Detection
 #
 
-import os
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import torchvision
 import torchvision.transforms.functional as TF
 from PIL import Image
@@ -13,12 +12,27 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import random
 
-
 VOC_CLASSES = [
-    "aeroplane", "bicycle", "bird", "boat", "bottle",
-    "bus", "car", "cat", "chair", "cow",
-    "diningtable", "dog", "horse", "motorbike", "person",
-    "pottedplant", "sheep", "sofa", "train", "tvmonitor",
+    "aeroplane",
+    "bicycle",
+    "bird",
+    "boat",
+    "bottle",
+    "bus",
+    "car",
+    "cat",
+    "chair",
+    "cow",
+    "diningtable",
+    "dog",
+    "horse",
+    "motorbike",
+    "person",
+    "pottedplant",
+    "sheep",
+    "sofa",
+    "train",
+    "tvmonitor",
 ]
 
 CLASS_TO_IDX = {cls: i + 1 for i, cls in enumerate(VOC_CLASSES)}  # 1-indexed
@@ -108,7 +122,11 @@ class VOCDetectionDataset(Dataset):
             self.cached_annotations = []
             try:
                 from tqdm import tqdm
-                pbar = tqdm(self.entries, desc=f"Caching VOC {'trainval' if augment else 'val'} to RAM")
+
+                pbar = tqdm(
+                    self.entries,
+                    desc=f"Caching VOC {'trainval' if augment else 'val'} to RAM",
+                )
             except ImportError:
                 pbar = self.entries
 
@@ -172,6 +190,7 @@ class VOCDetectionDataset(Dataset):
     def __getitem__(self, idx):
         if self.cache_ram:
             import io
+
             img_bytes = self.cached_images[idx]
             image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             boxes, labels, difficults = self.cached_annotations[idx]
@@ -201,8 +220,14 @@ class VOCDetectionDataset(Dataset):
         if self.augment:
             # For training: exclude difficult objects from augmentation & targets
             easy_mask = ~difficults
-            train_boxes = boxes[easy_mask] if easy_mask.any() else np.zeros((0, 4), dtype=np.float32)
-            train_labels = labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
+            train_boxes = (
+                boxes[easy_mask]
+                if easy_mask.any()
+                else np.zeros((0, 4), dtype=np.float32)
+            )
+            train_labels = (
+                labels[easy_mask] if easy_mask.any() else np.array([], dtype=np.int64)
+            )
             train_difficults = np.zeros(len(train_boxes), dtype=bool)
 
             if len(train_boxes) > 0:
@@ -211,7 +236,11 @@ class VOCDetectionDataset(Dataset):
                 )
                 # Filter invalid boxes after _augment
                 train_boxes, train_labels, train_difficults = filter_and_clip_boxes(
-                    train_boxes, image.size[0], image.size[1], train_labels, train_difficults
+                    train_boxes,
+                    image.size[0],
+                    image.size[1],
+                    train_labels,
+                    train_difficults,
                 )
 
             image, train_boxes = self._resize(image, train_boxes, self.img_size)
@@ -278,8 +307,11 @@ class VOCDetectionDataset(Dataset):
             left = random.randint(0, new_w - w)
             top = random.randint(0, new_h - h)
 
-            expanded = Image.new("RGB", (new_w, new_h),
-                                  (int(0.485 * 255), int(0.456 * 255), int(0.406 * 255)))
+            expanded = Image.new(
+                "RGB",
+                (new_w, new_h),
+                (int(0.485 * 255), int(0.456 * 255), int(0.406 * 255)),
+            )
             expanded.paste(image, (left, top))
             image = expanded
 
@@ -291,7 +323,9 @@ class VOCDetectionDataset(Dataset):
 
         # Random crop (IoU-aware)
         if random.random() > 0.5:
-            image, boxes, labels, difficults = self._random_crop(image, boxes, labels, difficults)
+            image, boxes, labels, difficults = self._random_crop(
+                image, boxes, labels, difficults
+            )
 
         return image, boxes, labels, difficults
 
@@ -331,11 +365,17 @@ class VOCDetectionDataset(Dataset):
             new_difficults = difficults[mask]
 
             # Filter out boxes that are too small
-            valid = (new_boxes[:, 2] - new_boxes[:, 0] > 5) & \
-                    (new_boxes[:, 3] - new_boxes[:, 1] > 5)
+            valid = (new_boxes[:, 2] - new_boxes[:, 0] > 5) & (
+                new_boxes[:, 3] - new_boxes[:, 1] > 5
+            )
             if valid.any():
                 cropped_image = image.crop((left, top, right, bottom))
-                return cropped_image, new_boxes[valid], new_labels[valid], new_difficults[valid]
+                return (
+                    cropped_image,
+                    new_boxes[valid],
+                    new_labels[valid],
+                    new_difficults[valid],
+                )
 
         return image, boxes, labels, difficults
 

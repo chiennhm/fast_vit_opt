@@ -7,21 +7,52 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import os
 
-
 # VOC class names
 VOC_CLASSES = [
-    "aeroplane", "bicycle", "bird", "boat", "bottle",
-    "bus", "car", "cat", "chair", "cow",
-    "diningtable", "dog", "horse", "motorbike", "person",
-    "pottedplant", "sheep", "sofa", "train", "tvmonitor",
+    "aeroplane",
+    "bicycle",
+    "bird",
+    "boat",
+    "bottle",
+    "bus",
+    "car",
+    "cat",
+    "chair",
+    "cow",
+    "diningtable",
+    "dog",
+    "horse",
+    "motorbike",
+    "person",
+    "pottedplant",
+    "sheep",
+    "sofa",
+    "train",
+    "tvmonitor",
 ]
 
 # Color palette for each class (distinct colors)
 CLASS_COLORS = [
-    (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255),
-    (0, 255, 255), (128, 0, 0), (0, 128, 0), (0, 0, 128), (128, 128, 0),
-    (128, 0, 128), (0, 128, 128), (255, 128, 0), (255, 0, 128), (128, 255, 0),
-    (0, 255, 128), (128, 0, 255), (0, 128, 255), (255, 128, 128), (128, 255, 128),
+    (255, 0, 0),
+    (0, 255, 0),
+    (0, 0, 255),
+    (255, 255, 0),
+    (255, 0, 255),
+    (0, 255, 255),
+    (128, 0, 0),
+    (0, 128, 0),
+    (0, 0, 128),
+    (128, 128, 0),
+    (128, 0, 128),
+    (0, 128, 128),
+    (255, 128, 0),
+    (255, 0, 128),
+    (128, 255, 0),
+    (0, 255, 128),
+    (128, 0, 255),
+    (0, 128, 255),
+    (255, 128, 128),
+    (128, 255, 128),
 ]
 
 
@@ -97,7 +128,9 @@ def draw_detections(
             )
 
         # Label text
-        cls_name = class_names[label - 1] if label - 1 < len(class_names) else f"cls_{label}"
+        cls_name = (
+            class_names[label - 1] if label - 1 < len(class_names) else f"cls_{label}"
+        )
         if scores is not None:
             text = f"{cls_name}: {scores[i]:.2f}"
         else:

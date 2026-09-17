@@ -3,7 +3,7 @@
 # Copyright (C) 2023 Apple Inc. All rights reserved.
 #
 
-""" ImageNet Validation Script
+"""ImageNet Validation Script
 
 This is intended to be a lean and easily modifiable ImageNet validation script for evaluating pretrained
 models or training checkpoints against ImageNet or similarly organized image datasets. It prioritizes
@@ -11,6 +11,7 @@ canonical PyTorch, standard Python style, and good performance. Repurpose as you
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
+
 import argparse
 import os
 import csv
@@ -39,7 +40,7 @@ from timm.utils import (
     set_jit_legacy,
 )
 
-import models
+import models  # noqa: F401
 from models.modules.mobileone import reparameterize_model
 
 has_apex = False
@@ -538,7 +539,7 @@ def main():
                 if args.checkpoint:
                     result["checkpoint"] = args.checkpoint
                 results.append(result)
-        except KeyboardInterrupt as e:
+        except KeyboardInterrupt:
             pass
         results = sorted(results, key=lambda x: x["top1"], reverse=True)
         if len(results):

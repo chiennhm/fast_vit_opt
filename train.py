@@ -3,7 +3,7 @@
 # Copyright (C) 2023 Apple Inc. All rights reserved.
 #
 
-""" ImageNet Training Script
+"""ImageNet Training Script
 
 This is intended to be a lean and easily modifiable ImageNet training script that reproduces ImageNet
 training results with some of the latest networks and training techniques. It favours canonical PyTorch
@@ -18,12 +18,12 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 
 Hacked together by / Copyright 2020 Ross Wightman (https://github.com/rwightman)
 """
+
 import argparse
 import time
 import yaml
 import os
 import glob
-import math
 import logging
 from collections import OrderedDict
 from contextlib import suppress
@@ -50,13 +50,31 @@ from timm.models import (
     model_parameters,
 )
 from timm.layers import convert_splitbn_model
-from timm.utils import *
-from timm.loss import *
+from timm.utils import (
+    setup_default_logging,
+    random_seed,
+    ModelEmaV2,
+    get_outdir,
+    CheckpointSaver,
+    distribute_bn,
+    update_summary,
+    AverageMeter,
+    dispatch_clip_grad,
+    reduce_tensor,
+    accuracy,
+    ApexScaler,
+    NativeScaler,
+)
+from timm.loss import (
+    JsdCrossEntropy,
+    BinaryCrossEntropy,
+    SoftTargetCrossEntropy,
+    LabelSmoothingCrossEntropy,
+)
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler
-from timm.utils import ApexScaler, NativeScaler
 
-import models
+import models  # noqa: F401
 from misc.distillation_loss import DistillationLoss
 from misc.cosine_annealing import CosineWDSchedule
 
