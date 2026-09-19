@@ -360,29 +360,6 @@ class RetinaNetHead(nn.Module):
 class FastViTDetector(nn.Module):
     """Object detector using FastViT backbone + FPN + RetinaNet head.
     """
-    VOC_CLASSES = [
-        "aeroplane",
-        "bicycle",
-        "bird",
-        "boat",
-        "bottle",
-        "bus",
-        "car",
-        "cat",
-        "chair",
-        "cow",
-        "diningtable",
-        "dog",
-        "horse",
-        "motorbike",
-        "person",
-        "pottedplant",
-        "sheep",
-        "sofa",
-        "train",
-        "tvmonitor",
-    ]
-
     EMBED_DIMS = {
         "fastvit_t8": [48, 96, 192, 384],
         "fastvit_t12": [64, 128, 256, 512],
@@ -396,7 +373,7 @@ class FastViTDetector(nn.Module):
     def __init__(
         self,
         model_name: str = "fastvit_sa12",
-        num_classes: int = 20,
+        num_classes: int = 10,
         fpn_channels: int = 256,
         pretrained_backbone: str = None,
         anchor_sizes: Tuple[int, ...] = (11, 19, 28, 51, 153),

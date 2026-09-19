@@ -7,28 +7,18 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import os
 
-# VOC class names
-VOC_CLASSES = [
-    "aeroplane",
-    "bicycle",
-    "bird",
-    "boat",
-    "bottle",
+# BDD100K class names (1-indexed labels map to this zero-indexed list).
+BDD100K_CLASSES = [
+    "bike",
     "bus",
     "car",
-    "cat",
-    "chair",
-    "cow",
-    "diningtable",
-    "dog",
-    "horse",
-    "motorbike",
+    "motor",
     "person",
-    "pottedplant",
-    "sheep",
-    "sofa",
+    "rider",
+    "traffic light",
+    "traffic sign",
     "train",
-    "tvmonitor",
+    "truck",
 ]
 
 # Color palette for each class (distinct colors)
@@ -80,10 +70,10 @@ def draw_detections(
         PIL Image with drawn detections
     """
     if class_names is None:
-        class_names = VOC_CLASSES
+        class_names = BDD100K_CLASSES
 
     if isinstance(image, torch.Tensor):
-        image = image.cpu()
+        image = image.detach().cpu()
         if image.dim() == 3 and image.shape[0] == 3:
             image = image.permute(1, 2, 0)
         image = image.numpy()
@@ -97,11 +87,11 @@ def draw_detections(
         image = Image.fromarray(image)
 
     if isinstance(boxes, torch.Tensor):
-        boxes = boxes.cpu().numpy()
+        boxes = boxes.detach().cpu().numpy()
     if isinstance(labels, torch.Tensor):
-        labels = labels.cpu().numpy()
+        labels = labels.detach().cpu().numpy()
     if scores is not None and isinstance(scores, torch.Tensor):
-        scores = scores.cpu().numpy()
+        scores = scores.detach().cpu().numpy()
 
     draw = ImageDraw.Draw(image)
 

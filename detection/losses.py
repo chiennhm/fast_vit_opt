@@ -435,7 +435,7 @@ class DetectionLoss(nn.Module):
 
     def __init__(
         self,
-        num_classes=20,
+        num_classes=10,
         pos_iou_thresh=0.5,
         neg_iou_thresh=0.4,
         alpha=0.25,
@@ -540,10 +540,20 @@ class DetectionLoss(nn.Module):
             pos_mask = max_iou >= self.pos_iou_thresh
             cls_targets[pos_mask] = gt_labels[max_idx[pos_mask]]
 
-            # Ensure every GT has at least one anchor
-            gt_max_iou, gt_max_idx = iou.max(dim=0)  # (N,)
-            for gt_i in range(len(gt_boxes)):
-                anchor_i = gt_max_idx[gt_i]
+            # Ensure every GT has a distinct positive anchor. Independent
+            # argmax assignments can collide and silently leave one GT
+            # unmatched, especially for overlapping traffic objects.
+            gt_max_iou = iou.max(dim=0).values
+            claimed_anchors = set()
+            gt_order = torch.argsort(gt_max_iou, descending=True).tolist()
+            for gt_i in gt_order:
+                ranked_anchors = torch.argsort(iou[:, gt_i], descending=True).tolist()
+                anchor_i = next(
+                    candidate
+                    for candidate in ranked_anchors
+                    if candidate not in claimed_anchors
+                )
+                claimed_anchors.add(anchor_i)
                 cls_targets[anchor_i] = gt_labels[gt_i]
                 max_idx[anchor_i] = gt_i  # keep regression target consistent
                 pos_mask[anchor_i] = True

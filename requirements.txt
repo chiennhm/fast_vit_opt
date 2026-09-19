@@ -1,6 +1,3 @@
-# ============================================================
-#  Core
-# ============================================================
 torch>=2.0
 torchvision>=0.15
 timm>=0.9.0
@@ -8,20 +5,12 @@ numpy
 Pillow
 scipy
 pyyaml
+pycocotools
+matplotlib
+tqdm
 
-# ============================================================
-#  Detection pipeline
-# ============================================================
-matplotlib          # visualization (detection/visualize.py)
-
-# ============================================================
-#  Benchmark (optional — benchmark.py)
-# ============================================================
-fvcore            # FLOPs counting (pip install fvcore)
-nvidia-ml-py        # GPU energy monitoring (replaces deprecated pynvml)
-
-# ============================================================
-#  Experiment tracking (optional)
-# ============================================================
-wandb             # Weights & Biases logging
-tqdm              # Progress bars for training and validation
+# Optional analysis and experiment features retained by this project.
+opencv-python
+wandb
+fvcore
+nvidia-ml-py

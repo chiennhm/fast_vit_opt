@@ -12,7 +12,7 @@ from typing import Tuple, Union
 
 
 class GradCAM:
-    """Grad-CAM for Object Detection models (FastViTDetector / MaskRCNN)."""
+    """Grad-CAM for the FastViT BDD100K detector."""
 
     def __init__(self, model: nn.Module, target_layer: nn.Module = None):
         self.model = model

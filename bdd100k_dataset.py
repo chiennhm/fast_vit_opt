@@ -29,11 +29,9 @@ BDD100K_CAT_IDS = list(range(1, 11))
 BDD100K_CAT_TO_IDX = {cat_id: cat_id for cat_id in BDD100K_CAT_IDS}
 
 
-def filter_and_clip_boxes(boxes, img_w, img_h, labels, iscrowd, masks=None):
+def filter_and_clip_boxes(boxes, img_w, img_h, labels, iscrowd):
     """Clip boxes to image size, and filter out invalid boxes (width <= 0 or height <= 0)."""
     if len(boxes) == 0:
-        if masks is not None:
-            return boxes, labels, iscrowd, masks
         return boxes, labels, iscrowd
 
     boxes = boxes.copy()
@@ -47,12 +45,6 @@ def filter_and_clip_boxes(boxes, img_w, img_h, labels, iscrowd, masks=None):
     boxes = boxes[valid_mask]
     labels = labels[valid_mask]
     iscrowd = iscrowd[valid_mask]
-    if masks is not None and len(masks) > 0:
-        masks = masks[valid_mask]
-        return boxes, labels, iscrowd, masks
-
-    if masks is not None:
-        return boxes, labels, iscrowd, masks
     return boxes, labels, iscrowd
 
 
@@ -70,7 +62,6 @@ class BDD100KDetectionDataset(Dataset):
         img_size=512,
         augment=True,
         cache_ram=False,
-        load_masks=False,
     ):
         """
         Args:
@@ -79,12 +70,10 @@ class BDD100KDetectionDataset(Dataset):
             img_size: Target image size (square).
             augment: Apply data augmentation.
             cache_ram: Preload dataset to RAM.
-            load_masks: Whether to load segmentation masks (default: False).
         """
         self.img_dir = img_dir
         self.img_size = img_size
         self.augment = augment
-        self.load_masks = load_masks
 
         # ImageNet normalization
         self.mean = [0.485, 0.456, 0.406]
@@ -269,8 +258,6 @@ class BDD100KDetectionDataset(Dataset):
                 "area": torch.tensor(areas, dtype=torch.float32),
                 "iscrowd": torch.tensor(train_iscrowd, dtype=torch.int64),
             }
-            if self.load_masks:
-                targets["masks"] = torch.zeros((len(train_boxes), 1, 1), dtype=torch.bool)
         else:
             image, boxes = self._resize(image, boxes, self.img_size)
             new_w, new_h = image.size
@@ -290,8 +277,6 @@ class BDD100KDetectionDataset(Dataset):
                 "iscrowd": torch.tensor(iscrowd, dtype=torch.int64),
                 "difficults": torch.tensor(iscrowd == 1, dtype=torch.bool),
             }
-            if self.load_masks:
-                targets["masks"] = torch.zeros((len(boxes), 1, 1), dtype=torch.bool)
 
         return image, targets
 
@@ -449,8 +434,6 @@ def build_bdd100k_datasets(
     val_ann_file=None,
     weather=None,
     cache_ram=False,
-    train_load_masks=False,
-    val_load_masks=False,
 ):
     if weather is not None:
         weather_clean = weather.strip().lower().replace(" ", "_")
@@ -497,7 +480,6 @@ def build_bdd100k_datasets(
         img_size=img_size,
         augment=True,
         cache_ram=cache_ram,
-        load_masks=train_load_masks,
     )
 
     val_dataset = BDD100KDetectionDataset(
@@ -506,7 +488,6 @@ def build_bdd100k_datasets(
         img_size=img_size,
         augment=False,
         cache_ram=cache_ram,
-        load_masks=val_load_masks,
     )
 
     return train_dataset, val_dataset
