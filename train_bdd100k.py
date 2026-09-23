@@ -1,9 +1,13 @@
 """Train or evaluate the FastViT detector on BDD100K."""
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import platform
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -62,6 +66,12 @@ def parse_args():
         ],
     )
     parser.add_argument("--fpn-channels", type=int, default=256)
+    parser.add_argument(
+        "--architecture-version",
+        choices=["legacy", "fixed_c5"],
+        default="fixed_c5",
+        help="Use legacy only to reproduce checkpoints trained before the C5 fix.",
+    )
     parser.add_argument("--pretrained-backbone", default=None)
     parser.add_argument(
         "--anchor-sizes",
@@ -81,6 +91,12 @@ def parse_args():
     parser.add_argument("--clip-grad", type=float, default=5.0)
     parser.add_argument("--focal-alpha", type=float, default=0.25)
     parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument(
+        "--classification-loss",
+        choices=["binary_quality_focal", "qfl"],
+        default="qfl",
+        help="qfl uses detached decoded-box IoU as the positive class target.",
+    )
     parser.add_argument("--scheduler", choices=["step", "cosine"], default="step")
     parser.add_argument("--warmup-iters", type=int, default=500)
     parser.add_argument("--warmup-epochs", type=int, default=5)
@@ -95,12 +111,23 @@ def parse_args():
     parser.add_argument("--score-thresh", type=float, default=0.05)
     parser.add_argument("--nms-thresh", type=float, default=0.5)
     parser.add_argument("--max-detections", type=int, default=100)
+    parser.add_argument("--pre-nms-topk", type=int, default=2000)
     parser.add_argument("--save-json", action="store_true")
     parser.add_argument("--json-output-dir", default=None)
     parser.add_argument("--save-visualizations", action="store_true")
 
     parser.add_argument("--output", default="./output/bdd100k")
     parser.add_argument("--resume", default=None)
+    parser.add_argument(
+        "--resume-weights-only",
+        action="store_true",
+        help="Load model weights but start a new optimizer, scheduler, and epoch count.",
+    )
+    parser.add_argument(
+        "--allow-missing-checkpoint-metadata",
+        action="store_true",
+        help="Explicitly allow an old checkpoint that predates architecture metadata.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--wandb-project", default="fastvit-bdd100k")
@@ -117,6 +144,21 @@ def parse_args():
         parser.error("--accum-steps must be at least 1")
     if any(size <= 0 for size in args.anchor_sizes):
         parser.error("all five --anchor-sizes must be positive")
+    if args.pre_nms_topk < 1 or args.max_detections < 1:
+        parser.error("--pre-nms-topk and --max-detections must be positive")
+    if not 0.0 <= args.score_thresh <= 1.0:
+        parser.error("--score-thresh must be between 0 and 1")
+    if args.resume_weights_only and not args.resume:
+        parser.error("--resume-weights-only requires --resume")
+    if (
+        args.eval_only
+        and args.allow_missing_checkpoint_metadata
+        and args.architecture_version != "legacy"
+    ):
+        parser.error(
+            "metadata-free checkpoints may only be evaluated with "
+            "--architecture-version legacy"
+        )
     return args
 
 
@@ -141,6 +183,99 @@ def _make_loader(dataset, batch_size, workers, shuffle, device):
         drop_last=shuffle,
         persistent_workers=workers > 0,
     )
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_output(*arguments):
+    try:
+        completed = subprocess.run(
+            ["git", *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return completed.stdout.strip()
+
+
+def _experiment_metadata(args, model, device, paths):
+    status = _git_output("status", "--porcelain")
+    return {
+        "schema_version": 1,
+        "dataset": {
+            "name": "bdd100k",
+            "task": "bbox_detection",
+            "train_annotations": str(paths["train_ann"]),
+            "validation_annotations": str(paths["val_ann"]),
+            "category_mapping": {
+                str(index + 1): name for index, name in enumerate(BDD100K_CLASSES)
+            },
+        },
+        "architecture": model.architecture_metadata(),
+        "preprocessing": {
+            "short_side": args.img_size,
+            "long_side_max": 1333,
+            "batch_padding_multiple": 32,
+            "normalization": "imagenet",
+        },
+        "training": {
+            "matcher": "fixed_iou_0.4_0.5_force_positive",
+            "classification_loss": args.classification_loss,
+            "classification_beta": args.focal_gamma,
+            "classification_alpha": (
+                args.focal_alpha
+                if args.classification_loss == "binary_quality_focal"
+                else None
+            ),
+            "regression_loss": "ciou",
+            "seed": args.seed,
+        },
+        "inference": {
+            "score_threshold": args.score_thresh,
+            "nms_threshold": args.nms_thresh,
+            "pre_nms_topk_anchor_locations": args.pre_nms_topk,
+            "max_detections_per_image": args.max_detections,
+        },
+        "source": {
+            "commit": _git_output("rev-parse", "HEAD"),
+            "dirty": bool(status),
+            "status": status.splitlines() if status else [],
+        },
+        "environment": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "numpy": np.__version__,
+            "device": str(device),
+            "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        },
+        "input_checkpoint": {
+            "path": args.resume,
+            "sha256": _sha256(args.resume) if args.resume else None,
+        },
+    }
+
+
+def _checkpoint_training_contract(args):
+    return {
+        "matcher": "fixed_iou_0.4_0.5_force_positive",
+        "classification_loss": args.classification_loss,
+        "classification_beta": args.focal_gamma,
+        "classification_alpha": (
+            args.focal_alpha
+            if args.classification_loss == "binary_quality_focal"
+            else None
+        ),
+        "regression_loss": "ciou",
+    }
 
 
 def _parameter_groups(model, lr, weight_decay):
@@ -169,6 +304,7 @@ def _run_evaluation(model, loader, device, args, output_dir):
         score_thresh=args.score_thresh,
         nms_thresh=args.nms_thresh,
         max_detections=args.max_detections,
+        pre_nms_topk=args.pre_nms_topk,
         max_samples=args.max_eval_samples,
         output_dir=output_dir,
         save_visualizations=args.save_visualizations,
@@ -232,10 +368,26 @@ def main():
         fpn_channels=args.fpn_channels,
         pretrained_backbone=args.pretrained_backbone,
         anchor_sizes=tuple(args.anchor_sizes),
+        architecture_version=args.architecture_version,
     ).to(device)
+    experiment_metadata = _experiment_metadata(args, model, device, paths)
+    (output_dir / "protocol.json").write_text(
+        json.dumps(experiment_metadata, indent=2), encoding="utf-8"
+    )
+    logger.info(
+        "Effective architecture: %s",
+        json.dumps(model.architecture_metadata(), sort_keys=True),
+    )
 
     if args.eval_only:
-        load_checkpoint(args.resume, model)
+        load_checkpoint(
+            args.resume,
+            model,
+            expected_architecture=model.architecture_metadata(),
+            expected_training=_checkpoint_training_contract(args),
+            allow_missing_metadata=args.allow_missing_checkpoint_metadata,
+            weights_only=True,
+        )
         results = _run_evaluation(model, val_loader, device, args, output_dir)
         print_eval_results(results, logger_fn=logger.info)
         return
@@ -244,6 +396,7 @@ def main():
         num_classes=len(BDD100K_CLASSES),
         alpha=args.focal_alpha,
         gamma=args.focal_gamma,
+        classification_loss=args.classification_loss,
     )
     optimizer = torch.optim.AdamW(
         _parameter_groups(model, args.lr, args.weight_decay),
@@ -283,7 +436,15 @@ def main():
     best_map = -1.0
     if args.resume:
         start_epoch, best_map = load_checkpoint(
-            args.resume, model, optimizer, scaler, scheduler
+            args.resume,
+            model,
+            optimizer,
+            scaler,
+            scheduler,
+            expected_architecture=model.architecture_metadata(),
+            expected_training=_checkpoint_training_contract(args),
+            allow_missing_metadata=args.allow_missing_checkpoint_metadata,
+            weights_only=args.resume_weights_only,
         )
 
     for epoch in range(start_epoch, args.epochs):
@@ -325,6 +486,7 @@ def main():
             "scheduler_state_dict": scheduler.state_dict(),
             "best_map": best_map,
             "args": vars(args),
+            "metadata": experiment_metadata,
         }
         if scaler is not None:
             state["scaler_state_dict"] = scaler.state_dict()

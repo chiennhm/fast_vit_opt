@@ -31,6 +31,7 @@ except ImportError:
 # Project imports
 from detection.gradcam import GradCAM
 from detection.fastvit_detector import FastViTDetector
+from engine.checkpoint import load_checkpoint
 from bdd100k_dataset import BDD100KDetectionDataset, bdd100k_collate, BDD100K_CLASSES
 
 
@@ -144,6 +145,12 @@ def main():
     parser.add_argument("--val-img", type=str, default=None)
     parser.add_argument("--val-ann", type=str, default=None)
     parser.add_argument("--model", type=str, default="fastvit_sa12")
+    parser.add_argument(
+        "--architecture-version",
+        choices=["legacy", "fixed_c5"],
+        default="fixed_c5",
+    )
+    parser.add_argument("--allow-missing-checkpoint-metadata", action="store_true")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint .pth")
     parser.add_argument(
         "--max-samples", type=int, default=None, help="Max validation samples to evaluate (default: full set)"
@@ -181,15 +188,21 @@ def main():
 
     # Build model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = FastViTDetector(model_name=args.model, num_classes=num_classes)
+    model = FastViTDetector(
+        model_name=args.model,
+        num_classes=num_classes,
+        architecture_version=args.architecture_version,
+    )
 
     if os.path.exists(args.checkpoint):
-        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-        state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
-        model_dict = model.state_dict()
-        filtered = {k: v for k, v in state_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
-        model.load_state_dict(filtered, strict=False)
-        print(f"Loaded checkpoint ({len(filtered)}/{len(model_dict)} keys matched)")
+        load_checkpoint(
+            args.checkpoint,
+            model,
+            expected_architecture=model.architecture_metadata(),
+            allow_missing_metadata=args.allow_missing_checkpoint_metadata,
+            weights_only=True,
+        )
+        print("Loaded checkpoint with validated architecture metadata")
     else:
         print(f"Error: Checkpoint {args.checkpoint} not found!")
         sys.exit(1)

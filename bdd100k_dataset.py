@@ -80,8 +80,20 @@ class BDD100KDetectionDataset(Dataset):
         self.std = [0.229, 0.224, 0.225]
 
         print(f"Loading BDD100K annotations from {ann_file}...")
-        with open(ann_file, "r") as f:
+        with open(ann_file, "r", encoding="utf-8") as f:
             coco_data = json.load(f)
+
+        declared_category_ids = {
+            int(category["id"]) for category in coco_data.get("categories", [])
+        }
+        expected_category_ids = set(BDD100K_CAT_IDS)
+        if declared_category_ids != expected_category_ids:
+            missing = sorted(expected_category_ids - declared_category_ids)
+            unexpected = sorted(declared_category_ids - expected_category_ids)
+            raise ValueError(
+                "BDD100K detection JSON must declare exactly category IDs 1..10; "
+                f"missing={missing}, unexpected={unexpected}"
+            )
 
         # Build lookup tables
         self.images = {img["id"]: img for img in coco_data["images"]}
@@ -178,6 +190,7 @@ class BDD100KDetectionDataset(Dataset):
         return len(self.img_ids)
 
     def __getitem__(self, idx):
+        img_id = self.img_ids[idx]
         if self.cache_ram:
             import io
 
@@ -186,7 +199,6 @@ class BDD100KDetectionDataset(Dataset):
             boxes, labels, iscrowd = self.cached_annotations[idx]
             orig_w, orig_h = image.size
         else:
-            img_id = self.img_ids[idx]
             img_info = self.images[img_id]
             file_name = img_info["file_name"]
             img_path = os.path.join(self.img_dir, file_name)
@@ -259,6 +271,9 @@ class BDD100KDetectionDataset(Dataset):
                 "iscrowd": torch.tensor(train_iscrowd, dtype=torch.int64),
             }
         else:
+            original_areas = (boxes[:, 2] - boxes[:, 0]) * (
+                boxes[:, 3] - boxes[:, 1]
+            )
             image, boxes = self._resize(image, boxes, self.img_size)
             new_w, new_h = image.size
             boxes, labels, iscrowd = filter_and_clip_boxes(
@@ -268,15 +283,21 @@ class BDD100KDetectionDataset(Dataset):
             image = TF.to_tensor(image)
             image = TF.normalize(image, self.mean, self.std)
 
-            areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-
             targets = {
                 "boxes": torch.tensor(boxes, dtype=torch.float32),
                 "labels": torch.tensor(labels, dtype=torch.int64),
-                "area": torch.tensor(areas, dtype=torch.float32),
+                # COCO size buckets are defined in the original image space.
+                "area": torch.tensor(original_areas, dtype=torch.float32),
                 "iscrowd": torch.tensor(iscrowd, dtype=torch.int64),
                 "difficults": torch.tensor(iscrowd == 1, dtype=torch.bool),
             }
+
+        # Coordinates in ``boxes`` use the resized image space.  These fields
+        # make that contract explicit and allow evaluation to restore both GT
+        # and predictions to the original COCO coordinate system.
+        targets["image_id"] = torch.tensor(img_id, dtype=torch.int64)
+        targets["orig_size"] = torch.tensor([orig_h, orig_w], dtype=torch.int64)
+        targets["size"] = torch.tensor([new_h, new_w], dtype=torch.int64)
 
         return image, targets
 

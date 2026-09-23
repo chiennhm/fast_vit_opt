@@ -12,11 +12,16 @@ class DetectionMetricsTest(unittest.TestCase):
             "boxes": np.array([[1, 1, 11, 11]], dtype=np.float32),
             "labels": np.array([3], dtype=np.int64),
             "scores": np.array([0.99], dtype=np.float32),
+            "image_id": np.array(42, dtype=np.int64),
+            "orig_size": np.array([20, 30], dtype=np.int64),
         }
         target = {
             "boxes": np.array([[1, 1, 11, 11]], dtype=np.float32),
             "labels": np.array([3], dtype=np.int64),
             "iscrowd": np.array([0], dtype=np.int64),
+            "area": np.array([100], dtype=np.float32),
+            "image_id": np.array(42, dtype=np.int64),
+            "orig_size": np.array([20, 30], dtype=np.int64),
         }
         result = metrics.evaluate_coco(
             [prediction],
@@ -26,6 +31,9 @@ class DetectionMetricsTest(unittest.TestCase):
             class_names=[str(index) for index in range(10)],
         )
         self.assertAlmostEqual(result["mAP"], 1.0, places=6)
+        self.assertAlmostEqual(result["AP50"], 1.0, places=6)
+        self.assertAlmostEqual(result["AP75"], 1.0, places=6)
+        self.assertEqual(result["coco_protocol"]["image_ids"], [42])
 
 
 if __name__ == "__main__":

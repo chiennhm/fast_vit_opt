@@ -30,12 +30,24 @@ data/bdd100k/
 ## Train and evaluate
 
 ```bash
-python train_bdd100k.py --data-dir ./data/bdd100k --model fastvit_sa12
+python train_bdd100k.py --data-dir ./data/bdd100k --model fastvit_sa12 --architecture-version fixed_c5
 python train_bdd100k.py --data-dir ./data/bdd100k --model SAME_VARIANT --resume PATH/last.pth
 python train_bdd100k.py --data-dir ./data/bdd100k --model SAME_VARIANT --resume PATH/best.pth --eval-only --save-json
 ```
 
 All FastViT variants remain available: `fastvit_t8`, `fastvit_t12`, `fastvit_s12`, `fastvit_sa12`, `fastvit_sa24`, `fastvit_sa36`, and `fastvit_ma36`.
+
+`fixed_c5` is the default architecture. It feeds the output after the final
+attention stage to the FPN for SA/MA backbones. `legacy` preserves the former
+pre-attention C5 path only for reproducing old checkpoints. Metadata-free old
+checkpoints require both `--architecture-version legacy` and
+`--allow-missing-checkpoint-metadata`. Use `--resume-weights-only` when old
+weights initialize a new run; optimizer state is not reused across variants.
+
+Training now defaults to true Quality Focal Loss (`--classification-loss qfl`):
+the positive class target is the detached IoU of the current decoded box and
+its matched GT. The former binary target remains available as
+`--classification-loss binary_quality_focal` for controlled ablations.
 
 Convenience launchers live in `scripts/`. The full pipeline computes five FPN anchor sizes, passes them to training, and benchmarks the resulting checkpoint:
 

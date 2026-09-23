@@ -773,6 +773,7 @@ class FastViT(nn.Module):
         use_layer_scale=True,
         layer_scale_init_value=1e-5,
         fork_feat=False,
+        feature_version="fixed_c5",
         init_cfg=None,
         pretrained=None,
         cls_ratio=2.0,
@@ -785,6 +786,12 @@ class FastViT(nn.Module):
         if not fork_feat:
             self.num_classes = num_classes
         self.fork_feat = fork_feat
+        if feature_version not in {"legacy", "fixed_c5"}:
+            raise ValueError(
+                "feature_version must be either 'legacy' or 'fixed_c5', "
+                f"got {feature_version!r}"
+            )
+        self.feature_version = feature_version
 
         if pos_embs is None:
             pos_embs = [None] * len(layers)
@@ -794,6 +801,7 @@ class FastViT(nn.Module):
 
         # Build the main stages of the network architecture
         network = []
+        stage_output_indices = []
         for i in range(len(layers)):
             # Add position embeddings if requested
             if pos_embs[i] is not None:
@@ -818,6 +826,10 @@ class FastViT(nn.Module):
                 inference_mode=inference_mode,
             )
             network.append(stage)
+            # Record the actual output of each semantic stage.  SA/MA variants
+            # insert RepCPE before the final stage, so their final stage index
+            # differs from the all-convolutional T/S variants.
+            stage_output_indices.append(len(network) - 1)
             if i >= len(layers) - 1:
                 break
 
@@ -834,11 +846,24 @@ class FastViT(nn.Module):
                 )
 
         self.network = nn.ModuleList(network)
+        self.stage_output_indices = tuple(stage_output_indices)
 
         # For segmentation and detection, extract intermediate output
         if self.fork_feat:
             # add a norm layer for each output
-            self.out_indices = [0, 2, 4, 6]
+            if self.feature_version == "legacy":
+                # Historical behavior retained only for evaluating old
+                # checkpoints.  For SA/MA this forks C5 after RepCPE but before
+                # the final attention stage.
+                self.out_indices = [0, 2, 4, 6]
+            else:
+                self.out_indices = list(self.stage_output_indices)
+            if len(self.out_indices) != len(embed_dims):
+                raise RuntimeError(
+                    "FastViT feature extraction must expose exactly one output "
+                    "per backbone stage"
+                )
+            self.out_norm_names = []
             for i_emb, i_layer in enumerate(self.out_indices):
                 if i_emb == 0 and os.environ.get("FORK_LAST3", None):
                     """For RetinaNet, `start_level=1`. The first norm layer will not used.
@@ -847,8 +872,11 @@ class FastViT(nn.Module):
                     layer = nn.Identity()
                 else:
                     layer = norm_layer(embed_dims[i_emb])
-                layer_name = f"norm{i_layer}"
+                # Keep checkpoint parameter names stable across legacy and
+                # fixed_c5.  Only the tensor feeding the final norm changes.
+                layer_name = f"norm{2 * i_emb}"
                 self.add_module(layer_name, layer)
+                self.out_norm_names.append(layer_name)
         else:
             # Classifier head
             self.gap = nn.AdaptiveAvgPool2d(output_size=1)
@@ -938,7 +966,8 @@ class FastViT(nn.Module):
         for idx, block in enumerate(self.network):
             x = block(x)
             if self.fork_feat and idx in self.out_indices:
-                norm_layer = getattr(self, f"norm{idx}")
+                output_position = self.out_indices.index(idx)
+                norm_layer = getattr(self, self.out_norm_names[output_position])
                 x_out = norm_layer(x)
                 outs.append(x_out)
         if self.fork_feat:

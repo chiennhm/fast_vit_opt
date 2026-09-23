@@ -278,7 +278,14 @@ def benchmark_latency(
 # ============================================================================
 # Build model helper
 # ============================================================================
-def build_model(variant, device, reparam=False, checkpoint=None):
+def build_model(
+    variant,
+    device,
+    reparam=False,
+    checkpoint=None,
+    architecture_version="fixed_c5",
+    allow_missing_metadata=False,
+):
     """Build a BDD100K detector model.
 
     Args:
@@ -289,14 +296,23 @@ def build_model(variant, device, reparam=False, checkpoint=None):
         checkpoint: path to .pth checkpoint to load weights from
     """
     from detection.fastvit_detector import FastViTDetector
+    from engine.checkpoint import load_checkpoint
 
-    model = FastViTDetector(model_name=variant, num_classes=10)
+    model = FastViTDetector(
+        model_name=variant,
+        num_classes=10,
+        architecture_version=architecture_version,
+    )
 
     # Load checkpoint weights if provided
     if checkpoint is not None:
-        ckpt = torch.load(checkpoint, map_location="cpu")
-        state_dict = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
-        model.load_state_dict(state_dict, strict=False)
+        load_checkpoint(
+            checkpoint,
+            model,
+            expected_architecture=model.architecture_metadata(),
+            allow_missing_metadata=allow_missing_metadata,
+            weights_only=True,
+        )
         print(f"    Loaded checkpoint: {checkpoint}")
 
     if reparam and HAS_REPARAM:
@@ -449,6 +465,12 @@ def main():
         default=None,
         help="Path to .pth checkpoint to load weights from (use with --model variant_name)",
     )
+    parser.add_argument(
+        "--architecture-version",
+        choices=["legacy", "fixed_c5"],
+        default="fixed_c5",
+    )
+    parser.add_argument("--allow-missing-checkpoint-metadata", action="store_true")
 
     args = parser.parse_args()
 
@@ -496,6 +518,8 @@ def main():
                         device,
                         reparam=args.reparam,
                         checkpoint=args.checkpoint,
+                        architecture_version=args.architecture_version,
+                        allow_missing_metadata=args.allow_missing_checkpoint_metadata,
                     )
 
                     # FLOPs / params (always batch=1)
@@ -517,6 +541,7 @@ def main():
 
                     row = {
                         "variant": variant,
+                        "architecture_version": args.architecture_version,
                         "mode": "detection",
                         "img_size": img_size,
                         "batch_size": batch_size,

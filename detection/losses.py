@@ -35,6 +35,27 @@ def box_iou(boxes1, boxes2):
     return inter_area / (union_area + 1e-7)
 
 
+def aligned_box_iou(boxes1, boxes2):
+    """Compute pairwise-aligned IoU for two equally sized box tensors."""
+    if boxes1.shape != boxes2.shape or boxes1.ndim != 2 or boxes1.shape[-1] != 4:
+        raise ValueError(
+            "aligned_box_iou expects two tensors with the same shape (N, 4)"
+        )
+    top_left = torch.maximum(boxes1[:, :2], boxes2[:, :2])
+    bottom_right = torch.minimum(boxes1[:, 2:], boxes2[:, 2:])
+    intersection_wh = (bottom_right - top_left).clamp(min=0)
+    intersection = intersection_wh[:, 0] * intersection_wh[:, 1]
+    area1 = (
+        (boxes1[:, 2] - boxes1[:, 0]).clamp(min=0)
+        * (boxes1[:, 3] - boxes1[:, 1]).clamp(min=0)
+    )
+    area2 = (
+        (boxes2[:, 2] - boxes2[:, 0]).clamp(min=0)
+        * (boxes2[:, 3] - boxes2[:, 1]).clamp(min=0)
+    )
+    return intersection / (area1 + area2 - intersection + 1e-7)
+
+
 class FocalLoss(nn.Module):
     """Focal Loss for addressing class imbalance in dense detection.
 
@@ -274,11 +295,11 @@ def decode_boxes(deltas, anchors, weights=BOX_WEIGHTS, bbox_clip=4.135):
     return torch.stack([x1, y1, x2, y2], dim=1)
 
 
-class QualityFocalLoss(nn.Module):
-    """Quality Focal Loss (QFL) from Generalized Focal Loss (GFL).
+class BinaryQualityFocalLoss(nn.Module):
+    """Quality-focal weighting with binary classification targets.
 
-    Reference: Li et al. "Generalized Focal Loss: Learning Qualified and Distributed Bounding Boxes
-    for Dense Object Detection" (NeurIPS 2020)
+    This preserves the historical baseline behavior.  It is not the IoU-target
+    QFL variant from GFL because every positive target remains exactly one.
     """
 
     def __init__(self, alpha=0.25, beta=2.0, reduction="sum"):
@@ -322,6 +343,52 @@ class QualityFocalLoss(nn.Module):
         if self.reduction == "sum":
             return loss.sum()
         elif self.reduction == "mean":
+            return loss.mean() if loss.numel() > 0 else loss.sum()
+        return loss
+
+
+class QualityFocalLoss(nn.Module):
+    """Quality Focal Loss with IoU-valued positive targets.
+
+    For the matched class, the target is the detached IoU between the current
+    decoded box and its GT.  Every negative class has target zero.  This is the
+    QFL formulation from GFL; it intentionally does not add focal alpha
+    balancing on top of the quality modulation.
+    """
+
+    def __init__(self, beta=2.0, reduction="sum"):
+        super().__init__()
+        self.beta = beta
+        self.reduction = reduction
+
+    def forward(self, pred, labels, quality):
+        """
+        Args:
+            pred: (N, C) classification logits.
+            labels: (N,) with -1 ignore, 0 background, 1..C foreground.
+            quality: (N,) IoU target for foreground anchors; zero otherwise.
+        """
+        if labels.shape != quality.shape:
+            raise ValueError("labels and quality must have the same shape")
+        num_classes = pred.shape[1]
+        target = torch.zeros_like(pred)
+        positive = labels > 0
+        if positive.any():
+            class_indices = (labels[positive] - 1).long()
+            if (class_indices < 0).any() or (class_indices >= num_classes).any():
+                raise ValueError("Foreground label lies outside the model classes")
+            target[positive, class_indices] = quality[positive].detach().clamp(0, 1)
+
+        probability = torch.sigmoid(pred)
+        modulation = torch.abs(target - probability).pow(self.beta)
+        loss = F.binary_cross_entropy_with_logits(
+            pred, target, reduction="none"
+        ) * modulation
+        loss = loss * (labels >= 0).unsqueeze(1).to(loss.dtype)
+
+        if self.reduction == "sum":
+            return loss.sum()
+        if self.reduction == "mean":
             return loss.mean() if loss.numel() > 0 else loss.sum()
         return loss
 
@@ -428,9 +495,10 @@ class DistributionFocalLoss(nn.Module):
 
 
 class DetectionLoss(nn.Module):
-    """Combined detection loss: Quality Focal Loss + CIoU Loss + optional DFL.
+    """Configurable classification loss + CIoU with fixed-IoU matching.
 
-    Handles anchor-target matching internally.
+    The inactive distribution-regression code is retained for later isolated
+    experiments, but the supported baseline uses four direct box deltas.
     """
 
     def __init__(
@@ -442,16 +510,26 @@ class DetectionLoss(nn.Module):
         gamma=2.0,
         box_loss_weight=1.0,
         reg_max=16,
+        classification_loss="qfl",
     ):
         super().__init__()
+        if classification_loss not in {"binary_quality_focal", "qfl"}:
+            raise ValueError(
+                "classification_loss must be 'binary_quality_focal' or 'qfl'"
+            )
         self.num_classes = num_classes
         self.pos_iou_thresh = pos_iou_thresh
         self.neg_iou_thresh = neg_iou_thresh
         self.box_loss_weight = box_loss_weight
         self.reg_max = reg_max
+        self.classification_loss = classification_loss
 
-        # Classification: Quality Focal Loss (behaves like Focal Loss for binary targets)
-        self.cls_loss = QualityFocalLoss(alpha=alpha, beta=gamma, reduction="sum")
+        if classification_loss == "qfl":
+            self.cls_loss = QualityFocalLoss(beta=gamma, reduction="sum")
+        else:
+            self.cls_loss = BinaryQualityFocalLoss(
+                alpha=alpha, beta=gamma, reduction="sum"
+            )
         # Bounding box regression: CIoU Loss + Distribution Focal Loss
         self.reg_loss = CIoULoss(reduction="sum")
         self.dfl_loss = DistributionFocalLoss(reg_max=reg_max, reduction="sum")
@@ -475,6 +553,7 @@ class DetectionLoss(nn.Module):
 
         all_cls_preds = []
         all_cls_targets = []
+        all_quality_targets = []
         all_reg_preds = []
         all_reg_targets = []
         
@@ -506,14 +585,32 @@ class DetectionLoss(nn.Module):
         for b in range(batch_size):
             gt_boxes = targets[b]["boxes"]  # (N, 4)
             gt_labels = targets[b]["labels"]  # (N,)
+            valid_anchor_mask = torch.ones(
+                anchors.shape[0], dtype=torch.bool, device=device
+            )
+            if "size" in targets[b]:
+                valid_h, valid_w = targets[b]["size"]
+                anchor_cx = (anchors[:, 0] + anchors[:, 2]) / 2
+                anchor_cy = (anchors[:, 1] + anchors[:, 3]) / 2
+                valid_anchor_mask = (
+                    (anchor_cx >= 0)
+                    & (anchor_cx < valid_w)
+                    & (anchor_cy >= 0)
+                    & (anchor_cy < valid_h)
+                )
 
             if len(gt_boxes) == 0:
-                # No GT boxes: all anchors are negative
+                # No GT boxes: valid anchors are negative and padded anchors
+                # are ignored.
                 cls_targets = torch.zeros(
                     anchors.shape[0], dtype=torch.long, device=device
                 )
+                cls_targets[~valid_anchor_mask] = -1
                 all_cls_preds.append(cls_preds[b])
                 all_cls_targets.append(cls_targets)
+                all_quality_targets.append(
+                    torch.zeros(anchors.shape[0], dtype=cls_preds.dtype, device=device)
+                )
                 # Append empty reg tensors for symmetry
                 all_reg_preds.append(torch.zeros(0, 4, device=device))
                 all_reg_targets.append(torch.zeros(0, 4, device=device))
@@ -537,17 +634,27 @@ class DetectionLoss(nn.Module):
             cls_targets[ignore_mask] = -1
 
             # Positive: IoU >= pos_thresh
-            pos_mask = max_iou >= self.pos_iou_thresh
+            pos_mask = (max_iou >= self.pos_iou_thresh) & valid_anchor_mask
             cls_targets[pos_mask] = gt_labels[max_idx[pos_mask]]
+            cls_targets[~valid_anchor_mask] = -1
 
             # Ensure every GT has a distinct positive anchor. Independent
             # argmax assignments can collide and silently leave one GT
             # unmatched, especially for overlapping traffic objects.
-            gt_max_iou = iou.max(dim=0).values
+            valid_anchor_indices = torch.where(valid_anchor_mask)[0]
+            if valid_anchor_indices.numel() == 0:
+                raise RuntimeError("No valid anchors remain inside the resized image")
+            valid_iou = iou[valid_anchor_indices]
+            gt_max_iou = valid_iou.max(dim=0).values
             claimed_anchors = set()
             gt_order = torch.argsort(gt_max_iou, descending=True).tolist()
             for gt_i in gt_order:
-                ranked_anchors = torch.argsort(iou[:, gt_i], descending=True).tolist()
+                ranked_local = torch.argsort(
+                    valid_iou[:, gt_i], descending=True
+                ).tolist()
+                ranked_anchors = [
+                    int(valid_anchor_indices[index]) for index in ranked_local
+                ]
                 anchor_i = next(
                     candidate
                     for candidate in ranked_anchors
@@ -563,6 +670,9 @@ class DetectionLoss(nn.Module):
 
             all_cls_preds.append(cls_preds[b])
             all_cls_targets.append(cls_targets)
+            quality_targets = torch.zeros(
+                anchors.shape[0], dtype=cls_preds.dtype, device=device
+            )
 
             # Collect regression predictions and targets
             if num_pos > 0:
@@ -586,6 +696,9 @@ class DetectionLoss(nn.Module):
                     )
                 all_reg_preds.append(pred_boxes_pos)
                 all_reg_targets.append(matched_gt)
+                quality_targets[pos_mask] = aligned_box_iou(
+                    pred_boxes_pos.detach(), matched_gt
+                ).clamp(0, 1)
                 
                 if use_dfl:
                     # Compute LTRB targets for DFL
@@ -606,12 +719,19 @@ class DetectionLoss(nn.Module):
             else:
                 all_reg_preds.append(torch.zeros(0, 4, device=device))
                 all_reg_targets.append(torch.zeros(0, 4, device=device))
+            all_quality_targets.append(quality_targets)
 
         # Flatten and compute losses
         all_cls_preds = torch.cat(all_cls_preds, dim=0)
         all_cls_targets = torch.cat(all_cls_targets, dim=0)
+        all_quality_targets = torch.cat(all_quality_targets, dim=0)
 
-        cls_loss = self.cls_loss(all_cls_preds, all_cls_targets)
+        if self.classification_loss == "qfl":
+            cls_loss = self.cls_loss(
+                all_cls_preds, all_cls_targets, all_quality_targets
+            )
+        else:
+            cls_loss = self.cls_loss(all_cls_preds, all_cls_targets)
 
         if total_pos > 0:
             all_reg_preds = torch.cat(all_reg_preds, dim=0)

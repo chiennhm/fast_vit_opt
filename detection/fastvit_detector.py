@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from collections import OrderedDict
-from typing import Tuple, List, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 from torchvision.ops import batched_nms
 
 from timm.models import create_model
@@ -381,11 +381,27 @@ class FastViTDetector(nn.Module):
         anchor_scales: Tuple[float, ...] = (1.0, 2 ** (1.0 / 3), 2 ** (2.0 / 3)),
         inference_mode: bool = False,
         reg_max: int = None,
+        architecture_version: str = "fixed_c5",
     ):
         super().__init__()
+        if model_name not in self.EMBED_DIMS:
+            raise ValueError(
+                f"Unsupported FastViT variant {model_name!r}; "
+                f"expected one of {sorted(self.EMBED_DIMS)}"
+            )
+        if architecture_version not in {"legacy", "fixed_c5"}:
+            raise ValueError(
+                "architecture_version must be either 'legacy' or 'fixed_c5', "
+                f"got {architecture_version!r}"
+            )
         self.num_classes = num_classes
         self.model_name = model_name
         self.reg_max = reg_max
+        self.fpn_channels = fpn_channels
+        self.architecture_version = architecture_version
+        self.anchor_sizes = tuple(anchor_sizes)
+        self.anchor_ratios = tuple(anchor_ratios)
+        self.anchor_scales = tuple(anchor_scales)
 
         embed_dims = self.EMBED_DIMS[model_name]
 
@@ -397,6 +413,7 @@ class FastViTDetector(nn.Module):
         self.backbone = create_model(
             model_name,
             fork_feat=True,
+            feature_version=architecture_version,
         )
 
         if pretrained_backbone is not None:
@@ -438,6 +455,23 @@ class FastViTDetector(nn.Module):
         )
         self.num_anchors = num_anchors
 
+    def architecture_metadata(self) -> Dict[str, object]:
+        """Return the checkpoint-critical detector configuration."""
+        return {
+            "schema_version": 1,
+            "architecture_version": self.architecture_version,
+            "model_name": self.model_name,
+            "num_classes": self.num_classes,
+            "fpn_channels": self.fpn_channels,
+            "feature_indices": list(self.backbone.out_indices),
+            "stage_output_indices": list(self.backbone.stage_output_indices),
+            "anchor_sizes": list(self.anchor_sizes),
+            "anchor_ratios": list(self.anchor_ratios),
+            "anchor_scales": list(self.anchor_scales),
+            "regression_mode": "dfl_ltrb" if self.reg_max is not None else "box_delta",
+            "reg_max": self.reg_max,
+        }
+
     def reparameterize(self) -> None:
         """Reparameterize backbone and FPN blocks."""
         from models.modules.mobileone import reparameterize_model
@@ -474,11 +508,21 @@ class FastViTDetector(nn.Module):
         score_thresh: float = 0.05,
         nms_thresh: float = 0.5,
         max_detections: int = 200,
+        pre_nms_topk: int = 2000,
+        image_sizes: Optional[Sequence[Tuple[int, int]]] = None,
     ) -> List[dict]:
         cls_preds, reg_preds, anchors = self.forward(images)
 
         batch_size = cls_preds.shape[0]
-        img_h, img_w = images.shape[2], images.shape[3]
+        padded_h, padded_w = images.shape[2], images.shape[3]
+        if pre_nms_topk < 1:
+            raise ValueError("pre_nms_topk must be at least 1")
+        if image_sizes is None:
+            image_sizes = [(padded_h, padded_w)] * batch_size
+        if len(image_sizes) != batch_size:
+            raise ValueError(
+                f"Expected {batch_size} valid image sizes, got {len(image_sizes)}"
+            )
         results = []
 
         # Check if regression head outputs distribution bins
@@ -496,15 +540,35 @@ class FastViTDetector(nn.Module):
             pred_offsets = reg_preds  # (B, A, 4)
 
         for b in range(batch_size):
+            img_h, img_w = (int(value) for value in image_sizes[b])
+            if img_h < 1 or img_w < 1 or img_h > padded_h or img_w > padded_w:
+                raise ValueError(
+                    f"Invalid image size {(img_h, img_w)} for padded batch size "
+                    f"{(padded_h, padded_w)}"
+                )
             scores = torch.sigmoid(cls_preds[b])  # (A, C)
             box_deltas = pred_offsets[b]  # (A, 4)
 
             max_scores, _ = scores.max(dim=1)  # (A,)
+            anchor_cx = (anchors[:, 0] + anchors[:, 2]) / 2
+            anchor_cy = (anchors[:, 1] + anchors[:, 3]) / 2
+            valid_anchors = (
+                (anchor_cx >= 0)
+                & (anchor_cx < img_w)
+                & (anchor_cy >= 0)
+                & (anchor_cy < img_h)
+            )
+            ranking_scores = max_scores.masked_fill(~valid_anchors, float("-inf"))
 
-            pre_nms_top_n = min(2000, max_scores.numel())
-            _, topk_anchors_idx = max_scores.topk(pre_nms_top_n)
+            pre_nms_top_n = min(pre_nms_topk, int(valid_anchors.sum().item()))
+            if pre_nms_top_n == 0:
+                topk_anchors_idx = torch.empty(
+                    0, dtype=torch.long, device=images.device
+                )
+            else:
+                _, topk_anchors_idx = ranking_scores.topk(pre_nms_top_n)
 
-            candidate_mask = max_scores > score_thresh
+            candidate_mask = (max_scores > score_thresh) & valid_anchors
             topk_mask = torch.zeros_like(candidate_mask)
             topk_mask[topk_anchors_idx] = True
             candidate_mask = candidate_mask & topk_mask
@@ -544,6 +608,22 @@ class FastViTDetector(nn.Module):
             boxes[:, 1].clamp_(min=0)
             boxes[:, 2].clamp_(max=img_w)
             boxes[:, 3].clamp_(max=img_h)
+
+            valid_boxes = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+            boxes = boxes[valid_boxes]
+            scores = scores[valid_boxes]
+
+            if boxes.numel() == 0:
+                results.append(
+                    {
+                        "boxes": torch.zeros((0, 4), device=images.device),
+                        "scores": torch.zeros((0,), device=images.device),
+                        "labels": torch.zeros(
+                            (0,), dtype=torch.long, device=images.device
+                        ),
+                    }
+                )
+                continue
 
             K, C = scores.shape
             flat_boxes = boxes.unsqueeze(1).expand(K, C, 4).reshape(-1, 4)  # (K*C, 4)

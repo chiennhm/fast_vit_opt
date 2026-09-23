@@ -63,7 +63,13 @@ ALL_VARIANTS = [
 # ============================================================================
 # Model builder  (reuses project conventions)
 # ============================================================================
-def build_model(variant, checkpoint=None, reparam=True):
+def build_model(
+    variant,
+    checkpoint=None,
+    reparam=True,
+    architecture_version="fixed_c5",
+    allow_missing_metadata=False,
+):
     """Build and prepare model for quantization.
 
     Always runs on CPU (quantization target) and in eval mode.
@@ -77,14 +83,23 @@ def build_model(variant, checkpoint=None, reparam=True):
         nn.Module on CPU in eval mode
     """
     from detection.fastvit_detector import FastViTDetector
+    from engine.checkpoint import load_checkpoint
 
-    model = FastViTDetector(model_name=variant, num_classes=10)
+    model = FastViTDetector(
+        model_name=variant,
+        num_classes=10,
+        architecture_version=architecture_version,
+    )
 
     # Load checkpoint if provided
     if checkpoint is not None:
-        ckpt = torch.load(checkpoint, map_location="cpu")
-        state_dict = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
-        model.load_state_dict(state_dict, strict=False)
+        load_checkpoint(
+            checkpoint,
+            model,
+            expected_architecture=model.architecture_metadata(),
+            allow_missing_metadata=allow_missing_metadata,
+            weights_only=True,
+        )
         print(f"  [✓] Loaded checkpoint: {checkpoint}")
 
     # Reparameterize: fuses BN + multi-branch into plain Conv2d
@@ -521,6 +536,12 @@ Examples:
         help="Path to .pth checkpoint to load weights from",
     )
     parser.add_argument(
+        "--architecture-version",
+        choices=["legacy", "fixed_c5"],
+        default="fixed_c5",
+    )
+    parser.add_argument("--allow-missing-checkpoint-metadata", action="store_true")
+    parser.add_argument(
         "--img-size",
         type=int,
         default=256,
@@ -614,6 +635,8 @@ Examples:
         args.model,
         checkpoint=args.checkpoint,
         reparam=not args.no_reparam,
+        architecture_version=args.architecture_version,
+        allow_missing_metadata=args.allow_missing_checkpoint_metadata,
     )
     fp32_size = get_model_size_mb(fp32_model)
     total_params, _ = count_parameters(fp32_model)
@@ -693,6 +716,7 @@ Examples:
             "model_state_dict": quant_model.state_dict(),
             "config": {
                 "variant": args.model,
+                "architecture_version": args.architecture_version,
                 "task": "bdd100k_detection",
                 "method": args.method,
                 "img_size": args.img_size,

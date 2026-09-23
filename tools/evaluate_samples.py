@@ -9,6 +9,7 @@ from detection.visualize import save_detection_results, draw_detections
 from bdd100k_dataset import BDD100KDetectionDataset, bdd100k_collate, BDD100K_CLASSES
 from detection.fastvit_detector import FastViTDetector
 from detection.gradcam import GradCAM, overlay_gradcam
+from engine.checkpoint import load_checkpoint
 
 
 def main():
@@ -19,6 +20,12 @@ def main():
     parser.add_argument("--val-img", type=str, default=None)
     parser.add_argument("--val-ann", type=str, default=None)
     parser.add_argument("--model", type=str, default="fastvit_sa12")
+    parser.add_argument(
+        "--architecture-version",
+        choices=["legacy", "fixed_c5"],
+        default="fixed_c5",
+    )
+    parser.add_argument("--allow-missing-checkpoint-metadata", action="store_true")
     parser.add_argument("--checkpoint", type=str, default="best.pth")
     parser.add_argument("--num-samples", type=int, default=10)
     parser.add_argument(
@@ -51,28 +58,21 @@ def main():
     # Load model
     print(f"Building model ({args.model})...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = FastViTDetector(model_name=args.model, num_classes=num_classes)
+    model = FastViTDetector(
+        model_name=args.model,
+        num_classes=num_classes,
+        architecture_version=args.architecture_version,
+    )
 
     if os.path.exists(args.checkpoint):
-        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-        if "model_state_dict" in checkpoint:
-            state_dict = checkpoint["model_state_dict"]
-        elif "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        else:
-            state_dict = checkpoint
-
-        # Scrub incompatible keys
-        model_dict = model.state_dict()
-        filtered = {
-            k: v
-            for k, v in state_dict.items()
-            if k in model_dict and v.shape == model_dict[k].shape
-        }
-        model.load_state_dict(filtered, strict=False)
-        print(
-            f"Loaded checkpoint from {args.checkpoint} ({len(filtered)}/{len(model_dict)} keys matched)"
+        load_checkpoint(
+            args.checkpoint,
+            model,
+            expected_architecture=model.architecture_metadata(),
+            allow_missing_metadata=args.allow_missing_checkpoint_metadata,
+            weights_only=True,
         )
+        print(f"Loaded checkpoint from {args.checkpoint} with validated metadata")
     else:
         print(
             f"Warning: Checkpoint {args.checkpoint} not found. Using untrained weights."
@@ -106,6 +106,7 @@ def main():
                 score_thresh=args.score_thresh,
                 nms_thresh=0.5,
                 max_detections=100,
+                image_sizes=[tuple(int(value) for value in targets[0]["size"])],
             )
 
         # 2. Generate Grad-CAM Heatmap

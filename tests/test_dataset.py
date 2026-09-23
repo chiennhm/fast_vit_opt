@@ -24,7 +24,15 @@ class BDD100KDatasetTest(unittest.TestCase):
                 "annotations": [
                     {"id": 1, "image_id": 1, "category_id": 3, "bbox": [5, 2, 10, 8]}
                 ],
-                "categories": [{"id": 3, "name": "car"}],
+                "categories": [
+                    {"id": index + 1, "name": name}
+                    for index, name in enumerate(
+                        [
+                            "bike", "bus", "car", "motor", "person", "rider",
+                            "traffic light", "traffic sign", "train", "truck",
+                        ]
+                    )
+                ],
             }
             annotation_path = root / "labels.json"
             annotation_path.write_text(json.dumps(annotations), encoding="utf-8")
@@ -38,6 +46,10 @@ class BDD100KDatasetTest(unittest.TestCase):
             self.assertEqual(tuple(image.shape), (3, 32, 64))
             self.assertEqual(tuple(empty_image.shape), (3, 32, 64))
             self.assertEqual(target["labels"].tolist(), [3])
+            self.assertEqual(target["image_id"].item(), 1)
+            self.assertEqual(target["orig_size"].tolist(), [20, 40])
+            self.assertEqual(target["size"].tolist(), [32, 64])
+            self.assertEqual(target["area"].tolist(), [80.0])
             self.assertNotIn("masks", target)
             self.assertEqual(tuple(empty_target["boxes"].shape), (0, 4))
 

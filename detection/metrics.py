@@ -1,23 +1,14 @@
-#
-# COCO-style mAP evaluation using pycocotools
-#
-# Uses the official pycocotools COCOeval engine for BDD100K bounding boxes.
-#
+"""Official COCO bbox evaluation for the BDD100K detector."""
 
-import logging
-import io
 import contextlib
+import io
+import logging
 
-import torch
 import numpy as np
+import torch
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================================
-# Optional import so lightweight tools can still show help; evaluation fails
-# explicitly when the dependency is unavailable.
-# ============================================================================
 try:
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
@@ -27,304 +18,343 @@ except ImportError:
     HAS_PYCOCOTOOLS = False
 
 
-# ============================================================================
-# Convert internal prediction / GT lists → COCO JSON dicts
-# ============================================================================
-def _build_coco_gt(ground_truths, num_classes, class_names=None):
-    """Build a COCO-format ground-truth dict from a list of target dicts.
+COCO_IOU_THRESHOLDS = np.linspace(0.50, 0.95, 10)
+COCO_RECALL_THRESHOLDS = np.linspace(0.0, 1.0, 101)
+COCO_MAX_DETECTIONS = (1, 10, 100)
+COCO_AREA_RANGES = (
+    (0.0, 1e10),
+    (0.0, 32.0**2),
+    (32.0**2, 96.0**2),
+    (96.0**2, 1e10),
+)
+COCO_AREA_LABELS = ("all", "small", "medium", "large")
 
-    Args:
-        ground_truths: list of dicts with keys
-            'boxes' (N,4), 'labels' (N,), and optionally 'difficults' (N,)
-            or 'iscrowd' (N,) or 'area' (N,).
-        num_classes: total number of foreground classes.
-        class_names: optional list of class name strings.
 
-    Returns:
-        coco_gt_dict: dict ready to load via COCO().
-    """
+def _as_numpy(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _as_int(value):
+    array = _as_numpy(value)
+    if array.size != 1:
+        raise ValueError(f"Expected a scalar value, got shape {array.shape}")
+    return int(array.reshape(-1)[0])
+
+
+def _image_size(record):
+    if "orig_size" not in record:
+        raise KeyError("Evaluation records must include orig_size=[height, width]")
+    size = _as_numpy(record["orig_size"]).reshape(-1)
+    if size.size != 2:
+        raise ValueError(f"orig_size must contain [height, width], got {size}")
+    height, width = (int(size[0]), int(size[1]))
+    if height < 1 or width < 1:
+        raise ValueError(f"Invalid original image size {(height, width)}")
+    return height, width
+
+
+def build_coco_ground_truth(ground_truths, num_classes, class_names=None):
+    """Convert targets in original-image coordinates to a COCO dataset dict."""
     images = []
     annotations = []
-    ann_id = 1
+    annotation_id = 1
+    seen_image_ids = set()
 
-    for img_idx, gt in enumerate(ground_truths):
-        # Register each image (width/height not used by COCOeval for bbox)
-        images.append(
-            {
-                "id": img_idx,
-                "width": 0,
-                "height": 0,
-            }
+    for fallback_id, target in enumerate(ground_truths):
+        image_id = _as_int(target.get("image_id", fallback_id))
+        if image_id in seen_image_ids:
+            raise ValueError(f"Duplicate image_id in evaluation data: {image_id}")
+        seen_image_ids.add(image_id)
+        height, width = _image_size(target)
+        images.append({"id": image_id, "width": width, "height": height})
+
+        boxes = _as_numpy(target["boxes"])
+        labels = _as_numpy(target["labels"])
+        crowds = _as_numpy(
+            target.get("iscrowd", np.zeros(len(boxes), dtype=np.int64))
         )
+        areas = target.get("area")
+        areas = _as_numpy(areas) if areas is not None else None
 
-        gt_boxes = gt["boxes"]
-        gt_labels = gt["labels"]
-        if isinstance(gt_boxes, torch.Tensor):
-            gt_boxes = gt_boxes.cpu().numpy()
-        if isinstance(gt_labels, torch.Tensor):
-            gt_labels = gt_labels.cpu().numpy()
-
-        # difficults / iscrowd
-        difficults = gt.get("difficults", None)
-        iscrowd = gt.get("iscrowd", None)
-        if difficults is not None and isinstance(difficults, torch.Tensor):
-            difficults = difficults.cpu().numpy()
-        if iscrowd is not None and isinstance(iscrowd, torch.Tensor):
-            iscrowd = iscrowd.cpu().numpy()
-
-        # area
-        areas = gt.get("area", None)
-        if areas is not None and isinstance(areas, torch.Tensor):
-            areas = areas.cpu().numpy()
-
-        for i in range(len(gt_boxes)):
-            x1, y1, x2, y2 = gt_boxes[i]
-            w = float(x2 - x1)
-            h = float(y2 - y1)
-            area = float(areas[i]) if areas is not None else w * h
-
-            # iscrowd: use explicit iscrowd, else treat difficults as crowd
-            if iscrowd is not None:
-                is_crowd = int(iscrowd[i])
-            elif difficults is not None:
-                is_crowd = int(difficults[i])
-            else:
-                is_crowd = 0
-
+        for index, (box, label) in enumerate(zip(boxes, labels)):
+            x1, y1, x2, y2 = (float(value) for value in box)
+            box_width = max(0.0, x2 - x1)
+            box_height = max(0.0, y2 - y1)
             annotations.append(
                 {
-                    "id": ann_id,
-                    "image_id": img_idx,
-                    "category_id": int(gt_labels[i]),
-                    "bbox": [float(x1), float(y1), w, h],  # COCO format: [x, y, w, h]
-                    "area": area,
-                    "iscrowd": is_crowd,
+                    "id": annotation_id,
+                    "image_id": image_id,
+                    "category_id": int(label),
+                    "bbox": [x1, y1, box_width, box_height],
+                    "area": (
+                        float(areas[index])
+                        if areas is not None
+                        else box_width * box_height
+                    ),
+                    "iscrowd": int(crowds[index]),
                 }
             )
-            ann_id += 1
+            annotation_id += 1
 
-    # Categories
-    categories = []
-    for cls_id in range(1, num_classes + 1):
-        name = class_names[cls_id - 1] if class_names else f"class_{cls_id}"
-        categories.append({"id": cls_id, "name": name})
-
+    categories = [
+        {
+            "id": category_id,
+            "name": (
+                class_names[category_id - 1]
+                if class_names
+                else f"class_{category_id}"
+            ),
+        }
+        for category_id in range(1, num_classes + 1)
+    ]
     return {
+        "info": {"description": "BDD100K bounding-box evaluation"},
+        "licenses": [],
         "images": images,
         "annotations": annotations,
         "categories": categories,
     }
 
 
-def _build_coco_dt(predictions):
-    """Build a COCO-format results list from a list of prediction dicts.
-
-    Args:
-        predictions: list of dicts with keys
-            'boxes' (N,4), 'labels' (N,), 'scores' (N,).
-
-    Returns:
-        coco_dt_list: list of result dicts for COCOeval.
-    """
+def build_coco_predictions(predictions):
+    """Convert predictions in original-image coordinates to COCO rows."""
     results = []
-    for img_idx, pred in enumerate(predictions):
-        pred_boxes = pred["boxes"]
-        pred_scores = pred["scores"]
-        pred_labels = pred["labels"]
-        if isinstance(pred_boxes, torch.Tensor):
-            pred_boxes = pred_boxes.cpu().numpy()
-        if isinstance(pred_scores, torch.Tensor):
-            pred_scores = pred_scores.cpu().numpy()
-        if isinstance(pred_labels, torch.Tensor):
-            pred_labels = pred_labels.cpu().numpy()
-
-        for i in range(len(pred_boxes)):
-            x1, y1, x2, y2 = pred_boxes[i]
-            w = float(x2 - x1)
-            h = float(y2 - y1)
+    for fallback_id, prediction in enumerate(predictions):
+        image_id = _as_int(prediction.get("image_id", fallback_id))
+        boxes = _as_numpy(prediction["boxes"])
+        scores = _as_numpy(prediction["scores"])
+        labels = _as_numpy(prediction["labels"])
+        for box, score, label in zip(boxes, scores, labels):
+            x1, y1, x2, y2 = (float(value) for value in box)
             results.append(
                 {
-                    "image_id": img_idx,
-                    "category_id": int(pred_labels[i]),
-                    "bbox": [float(x1), float(y1), w, h],
-                    "score": float(pred_scores[i]),
+                    "image_id": image_id,
+                    "category_id": int(label),
+                    "bbox": [x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)],
+                    "score": float(score),
                 }
             )
-
     return results
 
 
-# ============================================================================
-# Main evaluation entry point
-# ============================================================================
+def _mean_valid(values):
+    values = np.asarray(values)
+    valid = values[values > -1]
+    return float(np.mean(valid)) if valid.size else None
+
+
+def _empty_results(class_names, ground_truth, thresholds, max_detections):
+    gt_categories = {row["category_id"] for row in ground_truth["annotations"]}
+    per_class = {
+        name: {
+            "AP": 0.0 if index + 1 in gt_categories else None,
+            "AP50": 0.0 if index + 1 in gt_categories else None,
+            "AP75": 0.0 if index + 1 in gt_categories else None,
+            "AR100": 0.0 if index + 1 in gt_categories else None,
+        }
+        for index, name in enumerate(class_names)
+    }
+    return {
+        "mAP": 0.0,
+        "AP50": 0.0,
+        "AP75": 0.0,
+        "APS": 0.0,
+        "APM": 0.0,
+        "APL": 0.0,
+        "AR100": 0.0,
+        "ARS": 0.0,
+        "ARM": 0.0,
+        "ARL": 0.0,
+        "ap_per_class": {name: values["AP"] for name, values in per_class.items()},
+        "per_class": per_class,
+        "mAP_per_threshold": {float(value): 0.0 for value in thresholds},
+        "coco_protocol": {
+            "iou_thresholds": [float(value) for value in thresholds],
+            "recall_thresholds": 101,
+            "area_ranges": [list(value) for value in COCO_AREA_RANGES],
+            "area_labels": list(COCO_AREA_LABELS),
+            "max_detections": list(max_detections),
+        },
+    }
+
+
 def evaluate_coco(
     predictions,
     ground_truths,
     num_classes=10,
-    iou_threshold=0.5,
+    iou_threshold=None,
     class_names=None,
+    max_detections=COCO_MAX_DETECTIONS,
 ):
-    """Evaluate detection results using pycocotools COCOeval.
-
-    Uses the official COCO evaluator over the ten BDD100K categories.
-
-    Args:
-        predictions: list of dicts, each with:
-            - 'boxes': (N, 4) tensor [x1, y1, x2, y2]
-            - 'scores': (N,) tensor
-            - 'labels': (N,) tensor (1-indexed)
-        ground_truths: list of dicts, each with:
-            - 'boxes': (N, 4) tensor [x1, y1, x2, y2]
-            - 'labels': (N,) tensor (1-indexed)
-            - 'difficults': (N,) tensor of bools (optional, mapped to iscrowd)
-        num_classes: number of foreground classes
-        iou_threshold: IoU threshold (float or list of floats).
-            If a list, computes mAP at each threshold and averages
-            (COCO-style mAP@[.5:.95]).
-        class_names: list of class names for reporting
-
-    Returns:
-        results: dict with 'mAP', 'ap_per_class', and optionally
-            'mAP_per_threshold'.
-    """
+    """Evaluate bbox predictions with an explicit, canonical COCO protocol."""
     if not HAS_PYCOCOTOOLS:
         raise RuntimeError(
             "BDD100K evaluation requires pycocotools. "
             "Install the dependencies from requirements.txt."
         )
-
-    assert len(predictions) == len(ground_truths)
-
+    if len(predictions) != len(ground_truths):
+        raise ValueError(
+            "Predictions and ground truths must contain the same number of images"
+        )
     if class_names is None:
-        class_names = [f"class_{i}" for i in range(1, num_classes + 1)]
+        class_names = [f"class_{index}" for index in range(1, num_classes + 1)]
+    if len(class_names) != num_classes:
+        raise ValueError("class_names length must equal num_classes")
 
-    # Normalise threshold to list
-    if isinstance(iou_threshold, (list, tuple)):
-        thresholds = list(iou_threshold)
+    if iou_threshold is None:
+        thresholds = COCO_IOU_THRESHOLDS.copy()
+    elif isinstance(iou_threshold, (list, tuple, np.ndarray)):
+        thresholds = np.asarray(iou_threshold, dtype=np.float64)
     else:
-        thresholds = [iou_threshold]
+        thresholds = np.asarray([iou_threshold], dtype=np.float64)
+    max_detections = tuple(int(value) for value in max_detections)
+    if len(max_detections) != 3 or sorted(max_detections) != list(max_detections):
+        raise ValueError("max_detections must be three increasing integers")
 
-    # ── Build COCO objects ────────────────────────────────────────────────
-    gt_dict = _build_coco_gt(ground_truths, num_classes, class_names)
+    ground_truth = build_coco_ground_truth(
+        ground_truths, num_classes, class_names
+    )
+    if not ground_truth["annotations"]:
+        logger.warning("No ground-truth annotations; returning undefined class AP.")
+        return _empty_results(
+            class_names, ground_truth, thresholds, max_detections
+        )
 
-    # Guard: if there are no GT annotations, return zeros
-    if len(gt_dict["annotations"]) == 0:
-        logger.warning("No ground truth annotations — returning zero mAP.")
-        ap_per_class = {class_names[i]: None for i in range(num_classes)}
-        return {"mAP": 0.0, "ap_per_class": ap_per_class}
-
-    # Suppress pycocotools print spam
     with contextlib.redirect_stdout(io.StringIO()):
         coco_gt = COCO()
-        coco_gt.dataset = gt_dict
+        coco_gt.dataset = ground_truth
         coco_gt.createIndex()
 
-    dt_list = _build_coco_dt(predictions)
+    detections = build_coco_predictions(predictions)
+    if not detections:
+        logger.warning("No detections; returning zero AP for classes with GT.")
+        return _empty_results(
+            class_names, ground_truth, thresholds, max_detections
+        )
 
-    # Guard: if there are no detections, return zeros
-    if len(dt_list) == 0:
-        logger.warning("No detections — returning zero mAP.")
-        ap_per_class = {
-            class_names[i]: 0.0
-            for i in range(num_classes)
-            if any(a["category_id"] == i + 1 for a in gt_dict["annotations"])
-        }
-        # Fill classes with no GT as None
-        for i in range(num_classes):
-            name = class_names[i]
-            if name not in ap_per_class:
-                ap_per_class[name] = None
-        return {"mAP": 0.0, "ap_per_class": ap_per_class}
+    ground_truth_image_ids = [image["id"] for image in ground_truth["images"]]
+    valid_image_ids = set(ground_truth_image_ids)
+    invalid_detection_ids = sorted(
+        {row["image_id"] for row in detections} - valid_image_ids
+    )
+    if invalid_detection_ids:
+        raise ValueError(
+            "Predictions reference image IDs absent from ground truth: "
+            f"{invalid_detection_ids[:10]}"
+        )
 
     with contextlib.redirect_stdout(io.StringIO()):
-        coco_dt = coco_gt.loadRes(dt_list)
-
-    # ── Run COCOeval ──────────────────────────────────────────────────────
-    with contextlib.redirect_stdout(io.StringIO()):
+        coco_dt = coco_gt.loadRes(detections)
         coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
-        coco_eval.params.iouThrs = np.array(thresholds)
+        coco_eval.params.imgIds = ground_truth_image_ids
+        coco_eval.params.catIds = list(range(1, num_classes + 1))
+        coco_eval.params.iouThrs = thresholds
+        coco_eval.params.recThrs = COCO_RECALL_THRESHOLDS.copy()
+        coco_eval.params.maxDets = list(max_detections)
+        coco_eval.params.areaRng = [list(value) for value in COCO_AREA_RANGES]
+        coco_eval.params.areaRngLbl = list(COCO_AREA_LABELS)
         coco_eval.evaluate()
         coco_eval.accumulate()
 
-    # ── Extract per-class AP at primary (first) threshold ─────────────────
-    # coco_eval.eval['precision'] shape:
-    #   (T, R, K, A, M) = (nThresholds, nRecallThresholds, nCategories, nAreas, nMaxDets)
-    # We want per-class AP at primary threshold, area=all, maxDet=last
-    precision = coco_eval.eval["precision"]  # (T, R, K, A, M)
-    cat_ids = coco_eval.params.catIds  # list of category ids evaluated
+    precision = coco_eval.eval["precision"]  # T,R,K,A,M
+    recall = coco_eval.eval["recall"]  # T,K,A,M
 
-    ap_per_class = {}
-    primary_aps = []  # for computing primary mAP
-    for k_idx, cat_id in enumerate(cat_ids):
-        # precision at primary threshold (idx=0), all recall thresholds,
-        # this category, area=all (idx=0), maxDet=last (idx=-1)
-        pr_curve = precision[0, :, k_idx, 0, -1]
-        if pr_curve.size == 0 or (pr_curve == -1).all():
-            # No GT for this category at this threshold
-            ap_val = None
-        else:
-            # Mean over recall thresholds where precision > -1
-            valid = pr_curve[pr_curve > -1]
-            ap_val = float(np.mean(valid)) if len(valid) > 0 else 0.0
-            primary_aps.append(ap_val)
+    def threshold_index(value):
+        matches = np.where(np.isclose(thresholds, value))[0]
+        return int(matches[0]) if matches.size else None
 
-        # Map back to class name
-        name_idx = cat_id - 1  # category_ids are 1-indexed
-        if 0 <= name_idx < len(class_names):
-            ap_per_class[class_names[name_idx]] = ap_val
-        else:
-            ap_per_class[f"class_{cat_id}"] = ap_val
+    def ap(area_index=0, threshold=None):
+        values = precision[:, :, :, area_index, -1]
+        if threshold is not None:
+            index = threshold_index(threshold)
+            return None if index is None else _mean_valid(values[index])
+        return _mean_valid(values)
 
-    # Fill missing classes (no GT) as None
-    for i in range(num_classes):
-        name = class_names[i]
-        if name not in ap_per_class:
-            ap_per_class[name] = None
+    def ar(area_index=0):
+        return _mean_valid(recall[:, :, area_index, -1])
 
-    primary_mAP = float(np.mean(primary_aps)) if primary_aps else 0.0
+    per_threshold = {
+        float(threshold): (_mean_valid(precision[index, :, :, 0, -1]) or 0.0)
+        for index, threshold in enumerate(thresholds)
+    }
+    per_class = {}
+    for category_index, name in enumerate(class_names):
+        class_precision = precision[:, :, category_index, 0, -1]
+        class_recall = recall[:, category_index, 0, -1]
+        index_50 = threshold_index(0.50)
+        index_75 = threshold_index(0.75)
+        per_class[name] = {
+            "AP": _mean_valid(class_precision),
+            "AP50": (
+                _mean_valid(class_precision[index_50])
+                if index_50 is not None
+                else None
+            ),
+            "AP75": (
+                _mean_valid(class_precision[index_75])
+                if index_75 is not None
+                else None
+            ),
+            "AR100": _mean_valid(class_recall),
+        }
 
     result = {
-        "mAP": primary_mAP,
-        "ap_per_class": ap_per_class,
+        "mAP": ap() or 0.0,
+        "AP50": ap(threshold=0.50),
+        "AP75": ap(threshold=0.75),
+        "APS": ap(area_index=1),
+        "APM": ap(area_index=2),
+        "APL": ap(area_index=3),
+        "AR100": ar(),
+        "ARS": ar(area_index=1),
+        "ARM": ar(area_index=2),
+        "ARL": ar(area_index=3),
+        "ap_per_class": {
+            name: values["AP"] for name, values in per_class.items()
+        },
+        "per_class": per_class,
+        "mAP_per_threshold": per_threshold,
+        "coco_protocol": {
+            "iou_thresholds": [float(value) for value in thresholds],
+            "recall_thresholds": len(COCO_RECALL_THRESHOLDS),
+            "area_ranges": [list(value) for value in COCO_AREA_RANGES],
+            "area_labels": list(COCO_AREA_LABELS),
+            "max_detections": list(max_detections),
+            "image_ids": ground_truth_image_ids,
+            "category_ids": list(range(1, num_classes + 1)),
+        },
     }
-
-    # ── Multi-threshold: also report per-threshold mAP ────────────────────
-    if len(thresholds) > 1:
-        per_thresh_maps = {}
-        for t_idx, thresh in enumerate(thresholds):
-            t_aps = []
-            for k_idx in range(len(cat_ids)):
-                pr_curve = precision[t_idx, :, k_idx, 0, -1]
-                if pr_curve.size > 0 and not (pr_curve == -1).all():
-                    valid = pr_curve[pr_curve > -1]
-                    if len(valid) > 0:
-                        t_aps.append(float(np.mean(valid)))
-            per_thresh_maps[thresh] = float(np.mean(t_aps)) if t_aps else 0.0
-
-        result["mAP_per_threshold"] = per_thresh_maps
-        # Overall mAP is mean across thresholds (COCO convention)
-        result["mAP"] = float(np.mean(list(per_thresh_maps.values())))
-
     return result
 
 
 def print_eval_results(results, logger_fn=None):
-    """Print aggregate and per-class AP values."""
+    """Print aggregate and per-class COCO metrics."""
     if logger_fn is None:
         logger_fn = logger.info
 
-    logger_fn("=" * 60)
-    if "mAP_per_threshold" in results:
-        logger_fn(f"mAP@[0.5:0.95] = {results['mAP'] * 100:.2f}%")
-    else:
-        logger_fn(f"mAP = {results['mAP'] * 100:.2f}%")
-    logger_fn(f"{'Class':<20} {'AP':>10}")
-    logger_fn("-" * 30)
-    for class_name, ap in results["ap_per_class"].items():
-        value = "N/A" if ap is None else f"{ap * 100:.2f}%"
-        logger_fn(f"{class_name:<20} {value:>10}")
-    if "mAP_per_threshold" in results:
-        logger_fn("-" * 30)
-        for threshold, mean_ap in sorted(results["mAP_per_threshold"].items()):
-            logger_fn(f"mAP@{threshold:.2f} = {mean_ap * 100:.2f}%")
-    logger_fn("=" * 60)
+    def display(value):
+        return "N/A" if value is None else f"{value * 100:.2f}%"
+
+    logger_fn("=" * 72)
+    logger_fn(
+        "AP50:95={} AP50={} AP75={} APS={} APM={} APL={} AR100={}".format(
+            display(results.get("mAP")),
+            display(results.get("AP50")),
+            display(results.get("AP75")),
+            display(results.get("APS")),
+            display(results.get("APM")),
+            display(results.get("APL")),
+            display(results.get("AR100")),
+        )
+    )
+    logger_fn(f"{'Class':<20} {'AP':>10} {'AP50':>10} {'AP75':>10} {'AR100':>10}")
+    logger_fn("-" * 64)
+    for class_name, values in results.get("per_class", {}).items():
+        logger_fn(
+            f"{class_name:<20} {display(values['AP']):>10} "
+            f"{display(values['AP50']):>10} {display(values['AP75']):>10} "
+            f"{display(values['AR100']):>10}"
+        )
+    logger_fn("=" * 72)
