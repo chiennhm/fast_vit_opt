@@ -130,7 +130,16 @@ def extract_zip(zip_path, extract_to):
         return False
 
 
-def convert_bdd_to_coco(bdd_json_path, coco_json_path):
+def find_images(image_dir):
+    """Index local images once, including every nested shard directory."""
+    images = {}
+    for path in sorted(Path(image_dir).rglob("*")):
+        if path.is_file() and path.suffix.lower() in (".jpg", ".jpeg", ".png"):
+            images.setdefault(path.name, []).append(path)
+    return images
+
+
+def convert_bdd_to_coco(bdd_json_path, coco_json_path, image_dir=None):
     """Convert BDD100K format annotations to COCO-style format."""
     print(f"\nConverting {bdd_json_path} to COCO-style format...")
     if not os.path.exists(bdd_json_path):
@@ -139,6 +148,11 @@ def convert_bdd_to_coco(bdd_json_path, coco_json_path):
 
     with open(bdd_json_path, "r") as f:
         bdd_data = json.load(f)
+
+    image_root = Path(image_dir) if image_dir is not None else None
+    image_index = find_images(image_root) if image_root is not None else None
+    if image_index is not None:
+        print(f"Found {sum(map(len, image_index.values()))} images under {image_root}")
 
     categories = [
         {"id": 1, "name": "pedestrian"},
@@ -166,6 +180,17 @@ def convert_bdd_to_coco(bdd_json_path, coco_json_path):
 
     for img_id, frame in enumerate(bdd_data, start=1):
         file_name = frame["name"]
+        if image_root is not None:
+            relative_name = PurePosixPath(file_name.replace("\\", "/"))
+            image_path = image_root / relative_name
+            if not image_path.is_file():
+                candidates = image_index.get(relative_name.name, [])
+                if not candidates:
+                    raise FileNotFoundError(f"Annotation image not found under {image_root}: {file_name}")
+                if len(candidates) > 1:
+                    raise ValueError(f"Ambiguous image name {file_name}: {candidates}")
+                image_path = candidates[0]
+            file_name = image_path.relative_to(image_root).as_posix()
         width = 1280
         height = 720
 
@@ -244,7 +269,10 @@ def main():
     parser.add_argument("--dest-dir", default="./data/bdd100k")
     parser.add_argument("--archive", help="Use an existing Kaggle ZIP instead of downloading")
     parser.add_argument("--keep-zip", action="store_true", help="Keep the downloaded ZIP after successful conversion")
+    parser.add_argument("--convert-only", action="store_true", help="Scan existing local images and convert labels without downloading or extracting")
     args = parser.parse_args()
+    if args.convert_only and args.archive:
+        parser.error("--convert-only and --archive are mutually exclusive")
     dest_dir = os.path.expanduser(args.dest_dir)
     os.makedirs(dest_dir, exist_ok=True)
 
@@ -267,14 +295,14 @@ def main():
     expected_val = os.path.join(dest_dir, "labels", "det_20", "det_val.json")
     marker = Path(dest_dir) / ".kaggle_bdd100k_complete"
     images_ready = all(
-        any((Path(dest_dir) / "images" / "100k" / split).glob("*.jpg"))
+        bool(find_images(Path(dest_dir) / "images" / "100k" / split))
         for split in ("train", "val")
     )
     ready = marker.is_file() and images_ready and all(
         os.path.isfile(path) for path in (expected_train, expected_val)
     )
 
-    if args.archive or not ready:
+    if not args.convert_only and (args.archive or not ready):
         marker.unlink(missing_ok=True)
         if not os.path.exists(zip_path):
             success = download_with_progress(
@@ -297,7 +325,7 @@ def main():
             sys.exit(f"Missing detection labels after extraction: {path}")
     for split in ("train", "val"):
         image_dir = Path(dest_dir) / "images" / "100k" / split
-        if not any(image_dir.glob("*.jpg")):
+        if not find_images(image_dir):
             sys.exit(f"Missing {split} images after extraction: {image_dir}")
 
     # Convert
@@ -308,10 +336,11 @@ def main():
         if not convert_bdd_to_coco(
             bdd_json_path=os.path.join(dest_dir, "labels", "det_20", f"det_{split}.json"),
             coco_json_path=os.path.join(annotations_dir, f"bdd100k_det_{split}_coco.json"),
+            image_dir=Path(dest_dir) / "images" / "100k" / split,
         ):
             sys.exit(f"Failed to convert {split} annotations")
     marker.write_text(BDD100K_DATASET_URL + "\n", encoding="utf-8")
-    if not args.archive and not args.keep_zip and os.path.isfile(zip_path):
+    if not args.convert_only and not args.archive and not args.keep_zip and os.path.isfile(zip_path):
         os.remove(zip_path)
 
     print("\n============================================================")

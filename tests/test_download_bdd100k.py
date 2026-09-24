@@ -66,6 +66,43 @@ class DownloadBDD100KTest(unittest.TestCase):
             self.assertFalse((destination / ".kaggle_bdd100k_complete").exists())
             self.assertTrue(archive.is_file())
 
+    def test_nested_training_shards_are_recorded_in_coco(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "dataset.zip"
+            destination = root / "data"
+            self.make_archive(archive)
+            expected = [f"{folder}/image_{index}.jpg" for index, folder in enumerate(
+                ("trainA", "trainB", "testA", "testB")
+            )] + ["one.jpg"]
+            with zipfile.ZipFile(archive, "a") as handle:
+                for relative_path in expected[:-1]:
+                    handle.writestr(f"bdd100k/bdd100k/images/100k/train/{relative_path}", b"image")
+            self.run_main("--dest-dir", destination, "--archive", archive)
+            labels = destination / "labels/det_20/det_train.json"
+            labels.write_text(json.dumps([
+                {"name": Path(name).name, "labels": []} for name in expected
+            ]))
+            with patch.object(downloader, "download_with_progress") as download:
+                self.run_main("--dest-dir", destination, "--convert-only")
+                download.assert_not_called()
+            result = json.loads(
+                (destination / "annotations/bdd100k_det_train_coco.json").read_text()
+            )
+            self.assertEqual([image["file_name"] for image in result["images"]], expected)
+
+    def test_image_lookup_rejects_ambiguous_basenames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for folder in ("trainA", "trainB"):
+                (root / folder).mkdir()
+                (root / folder / "same.jpg").write_bytes(b"image")
+            labels = root / "labels.json"
+            labels.write_text(json.dumps([{"name": "same.jpg", "labels": []}]))
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ValueError, "Ambiguous image name"):
+                    downloader.convert_bdd_to_coco(labels, root / "coco.json", root)
+
     def test_non_zip_response_does_not_replace_existing_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "dataset.zip"

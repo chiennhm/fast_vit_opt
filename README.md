@@ -22,6 +22,14 @@ The script normalizes nested archive folders to the layout below. Downloaded ZIP
 are removed only after successful preparation; use `--keep-zip` to retain them.
 An archive supplied with `--archive` is always retained.
 
+Images are scanned recursively under `data/bdd100k/images/100k/train/`, including
+`trainA`, `trainB`, `testA`, `testB`, and the train directory itself. Validation
+images are also scanned recursively. COCO `file_name` entries retain relative
+subdirectory paths so the training loader can open them. Only images referenced
+by the split's detection labels become training/evaluation samples.
+For data already extracted by the script, run
+`python -m tools.download_bdd100k --convert-only` to regenerate COCO annotations.
+
 Expected layout:
 
 ```text
