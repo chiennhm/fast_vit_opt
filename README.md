@@ -9,11 +9,18 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Prepare the official BDD100K images separately, then convert the detection labels:
+Download BDD100K images and labels from the [Kaggle mirror](https://www.kaggle.com/datasets/solesensei/solesensei_bdd100k), then automatically convert the detection labels:
 
 ```bash
 python -m tools.download_bdd100k --dest-dir ./data/bdd100k
 ```
+
+The download is saved as `data/bdd100k/bdd100k.zip`, then extracted and the train/val
+labels are automatically converted to COCO JSON under `data/bdd100k/annotations/`.
+To use a ZIP already downloaded with curl, add `--archive ~/Downloads/bdd100k.zip`.
+The script normalizes nested archive folders to the layout below. Downloaded ZIPs
+are removed only after successful preparation; use `--keep-zip` to retain them.
+An archive supplied with `--archive` is always retained.
 
 Expected layout:
 

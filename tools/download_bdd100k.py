@@ -1,5 +1,5 @@
 #
-# BDD100K Annotations Downloader and COCO-Style Converter
+# BDD100K Kaggle Downloader and COCO-Style Converter
 #
 
 import argparse
@@ -9,9 +9,11 @@ import time
 import zipfile
 import urllib.request
 import json
+import shutil
+from pathlib import Path, PurePosixPath
 
-BDD100K_LABELS_URL = (
-    "https://dl.cv.ethz.ch/bdd100k/data/bdd100k_det_20_labels_trainval.zip"
+BDD100K_DATASET_URL = (
+    "https://www.kaggle.com/api/v1/datasets/download/solesensei/solesensei_bdd100k"
 )
 
 
@@ -31,18 +33,15 @@ def download_with_progress(url, dest_path, descr):
 
     opener = urllib.request.build_opener()
     opener.addheaders = [("User-Agent", "Mozilla/5.0")]
-    urllib.request.install_opener(opener)
+    partial_path = str(dest_path) + ".part"
 
     try:
-        response = urllib.request.urlopen(url)
-        meta = response.info()
-        file_size = int(meta.get("Content-Length", 0))
-        print(f"Total size: {format_size(file_size)}")
-
         downloaded = 0
         block_size = 1024 * 1024
 
-        with open(dest_path, "wb") as f:
+        with opener.open(url, timeout=120) as response, open(partial_path, "wb") as f:
+            file_size = int(response.info().get("Content-Length", 0))
+            print(f"Total size: {format_size(file_size) if file_size else 'unknown'}")
             while True:
                 buffer = response.read(block_size)
                 if not buffer:
@@ -68,26 +67,55 @@ def download_with_progress(url, dest_path, descr):
                 sys.stdout.write(status)
                 sys.stdout.flush()
 
+        if file_size and downloaded != file_size:
+            raise IOError(f"Incomplete download: {downloaded}/{file_size} bytes")
+        if not zipfile.is_zipfile(partial_path):
+            raise ValueError("Kaggle did not return a ZIP archive; check dataset access.")
+        os.replace(partial_path, dest_path)
         print(f"\nDownload complete in {time.time() - start_time:.1f}s.")
         return True
     except Exception as e:
         print(f"\nError downloading {descr}: {e}")
-        if os.path.exists(dest_path):
-            os.remove(dest_path)
+        if os.path.exists(partial_path):
+            os.remove(partial_path)
         return False
 
 
+def dataset_member_path(name):
+    """Map nested Kaggle paths to the detector's image and label layout."""
+    parts = PurePosixPath(name.replace("\\", "/")).parts
+    if not parts or ".." in parts or any(":" in part for part in parts):
+        return None
+    for index in range(len(parts) - 3):
+        if parts[index:index + 2] == ("images", "100k"):
+            if parts[index + 2] in ("train", "val", "test"):
+                return Path(*parts[index:])
+    for split in ("train", "val"):
+        if parts[-1] in (f"bdd100k_labels_images_{split}.json", f"det_{split}.json"):
+            return Path("labels", "det_20", f"det_{split}.json")
+    return None
+
+
 def extract_zip(zip_path, extract_to):
-    """Extract a zip file to the target directory."""
+    """Extract detection data, removing any enclosing Kaggle directories."""
     print(f"Extracting {os.path.basename(zip_path)} to {extract_to}...")
     start_time = time.time()
+    root = Path(extract_to).resolve()
     try:
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             members = zip_ref.infolist()
             total_files = len(members)
 
             for i, member in enumerate(members):
-                zip_ref.extract(member, extract_to)
+                relative_path = dataset_member_path(member.filename)
+                if member.is_dir() or relative_path is None:
+                    continue
+                destination = Path(extract_to) / relative_path
+                if not destination.resolve().is_relative_to(root):
+                    raise ValueError(f"Archive path escapes destination: {member.filename}")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with zip_ref.open(member) as source, destination.open("wb") as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
                 if i % max(1, total_files // 100) == 0 or i == total_files - 1:
                     percent = (i + 1) / total_files * 100
                     sys.stdout.write(
@@ -211,32 +239,48 @@ def convert_bdd_to_coco(bdd_json_path, coco_json_path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download BDD100K detection labels and convert them to COCO JSON"
+        description="Download BDD100K images and labels from Kaggle and convert labels to COCO JSON"
     )
     parser.add_argument("--dest-dir", default="./data/bdd100k")
+    parser.add_argument("--archive", help="Use an existing Kaggle ZIP instead of downloading")
+    parser.add_argument("--keep-zip", action="store_true", help="Keep the downloaded ZIP after successful conversion")
     args = parser.parse_args()
-    dest_dir = args.dest_dir
+    dest_dir = os.path.expanduser(args.dest_dir)
     os.makedirs(dest_dir, exist_ok=True)
 
-    zip_path = os.path.join(dest_dir, "bdd100k_det_20_labels_trainval.zip")
+    zip_path = (
+        os.path.expanduser(args.archive) if args.archive
+        else os.path.join(dest_dir, "bdd100k.zip")
+    )
+    if args.archive and not os.path.isfile(zip_path):
+        parser.error(f"Archive not found: {zip_path}")
 
     # Download
     print("============================================================")
-    print("  BDD100K Labels Downloader and Converter")
+    print("  BDD100K Kaggle Downloader and Converter")
     print("============================================================")
     print(f"Destination directory: {os.path.abspath(dest_dir)}")
     print("------------------------------------------------------------")
 
-    # If extracted files already exist, we can skip download
+    # A marker is written only after extraction and conversion both succeed.
     expected_train = os.path.join(dest_dir, "labels", "det_20", "det_train.json")
     expected_val = os.path.join(dest_dir, "labels", "det_20", "det_val.json")
+    marker = Path(dest_dir) / ".kaggle_bdd100k_complete"
+    images_ready = all(
+        any((Path(dest_dir) / "images" / "100k" / split).glob("*.jpg"))
+        for split in ("train", "val")
+    )
+    ready = marker.is_file() and images_ready and all(
+        os.path.isfile(path) for path in (expected_train, expected_val)
+    )
 
-    if not (os.path.exists(expected_train) and os.path.exists(expected_val)):
+    if args.archive or not ready:
+        marker.unlink(missing_ok=True)
         if not os.path.exists(zip_path):
             success = download_with_progress(
-                BDD100K_LABELS_URL,
+                BDD100K_DATASET_URL,
                 zip_path,
-                "BDD100K Detection Labels ZIP (~43 MB)",
+                "BDD100K images and labels (Kaggle ZIP)",
             )
             if not success:
                 print("Download failed. Exiting.")
@@ -248,29 +292,30 @@ def main():
             print("Extraction failed. Exiting.")
             sys.exit(1)
 
-        # Clean up zip
-        print(f"Deleting temporary zip file: {os.path.basename(zip_path)}...")
-        try:
-            os.remove(zip_path)
-            print("Deleted successfully.")
-        except Exception as e:
-            print(f"Could not delete zip file: {e}")
+    for path in (expected_train, expected_val):
+        if not os.path.isfile(path):
+            sys.exit(f"Missing detection labels after extraction: {path}")
+    for split in ("train", "val"):
+        image_dir = Path(dest_dir) / "images" / "100k" / split
+        if not any(image_dir.glob("*.jpg")):
+            sys.exit(f"Missing {split} images after extraction: {image_dir}")
 
     # Convert
     annotations_dir = os.path.join(dest_dir, "annotations")
     os.makedirs(annotations_dir, exist_ok=True)
 
-    convert_bdd_to_coco(
-        bdd_json_path=os.path.join(dest_dir, "labels", "det_20", "det_train.json"),
-        coco_json_path=os.path.join(annotations_dir, "bdd100k_det_train_coco.json"),
-    )
-    convert_bdd_to_coco(
-        bdd_json_path=os.path.join(dest_dir, "labels", "det_20", "det_val.json"),
-        coco_json_path=os.path.join(annotations_dir, "bdd100k_det_val_coco.json"),
-    )
+    for split in ("train", "val"):
+        if not convert_bdd_to_coco(
+            bdd_json_path=os.path.join(dest_dir, "labels", "det_20", f"det_{split}.json"),
+            coco_json_path=os.path.join(annotations_dir, f"bdd100k_det_{split}_coco.json"),
+        ):
+            sys.exit(f"Failed to convert {split} annotations")
+    marker.write_text(BDD100K_DATASET_URL + "\n", encoding="utf-8")
+    if not args.archive and not args.keep_zip and os.path.isfile(zip_path):
+        os.remove(zip_path)
 
     print("\n============================================================")
-    print("  All done! BDD100K annotations converted to COCO-style format.")
+    print("  All done! BDD100K images and COCO annotations are ready.")
     print("============================================================")
 
 
