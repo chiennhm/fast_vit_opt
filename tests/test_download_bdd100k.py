@@ -17,7 +17,7 @@ class DownloadBDD100KTest(unittest.TestCase):
                 if include_images:
                     archive.writestr(f"bdd100k/bdd100k/images/100k/{split}/one.jpg", b"image")
                 archive.writestr(
-                    f"bdd100k/labels/bdd100k_labels_images_{split}.json",
+                    f"bdd100k_labels_release/bdd100k/labels/bdd100k_labels_images_{split}.json",
                     json.dumps([{
                         "name": "one.jpg",
                         "labels": [{
@@ -102,6 +102,27 @@ class DownloadBDD100KTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(ValueError, "Ambiguous image name"):
                     downloader.convert_bdd_to_coco(labels, root / "coco.json", root)
+
+    def test_convert_only_reads_original_labels_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            labels_dir = root / "bdd100k_labels_release/bdd100k/labels"
+            labels_dir.mkdir(parents=True)
+            for split in ("train", "val"):
+                image_dir = root / "images/100k" / split / "shard"
+                image_dir.mkdir(parents=True)
+                (image_dir / "one.jpg").write_bytes(b"image")
+                (labels_dir / f"bdd100k_labels_images_{split}.json").write_text(
+                    json.dumps([{"name": "one.jpg", "labels": []}])
+                )
+            with patch.object(downloader, "download_with_progress") as download:
+                self.run_main("--dest-dir", root, "--convert-only")
+                download.assert_not_called()
+            for split in ("train", "val"):
+                result = json.loads(
+                    (root / f"annotations/bdd100k_det_{split}_coco.json").read_text()
+                )
+                self.assertEqual(result["images"][0]["file_name"], "shard/one.jpg")
 
     def test_non_zip_response_does_not_replace_existing_archive(self):
         with tempfile.TemporaryDirectory() as directory:

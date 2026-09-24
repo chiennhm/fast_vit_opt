@@ -130,6 +130,19 @@ def extract_zip(zip_path, extract_to):
         return False
 
 
+def find_label_file(data_dir, split):
+    """Locate normalized labels or the original Kaggle labels release."""
+    root = Path(data_dir)
+    filename = f"bdd100k_labels_images_{split}.json"
+    candidates = [
+        root / "labels" / "det_20" / f"det_{split}.json",
+        root / "bdd100k_labels_release" / "bdd100k" / "labels" / filename,
+        root / "bdd100k" / "labels" / filename,
+        root / "labels" / filename,
+    ]
+    return next((path for path in candidates if path.is_file()), candidates[0])
+
+
 def find_images(image_dir):
     """Index local images once, including every nested shard directory."""
     images = {}
@@ -291,8 +304,8 @@ def main():
     print("------------------------------------------------------------")
 
     # A marker is written only after extraction and conversion both succeed.
-    expected_train = os.path.join(dest_dir, "labels", "det_20", "det_train.json")
-    expected_val = os.path.join(dest_dir, "labels", "det_20", "det_val.json")
+    expected_train = find_label_file(dest_dir, "train")
+    expected_val = find_label_file(dest_dir, "val")
     marker = Path(dest_dir) / ".kaggle_bdd100k_complete"
     images_ready = all(
         bool(find_images(Path(dest_dir) / "images" / "100k" / split))
@@ -320,7 +333,8 @@ def main():
             print("Extraction failed. Exiting.")
             sys.exit(1)
 
-    for path in (expected_train, expected_val):
+    label_paths = {split: find_label_file(dest_dir, split) for split in ("train", "val")}
+    for path in label_paths.values():
         if not os.path.isfile(path):
             sys.exit(f"Missing detection labels after extraction: {path}")
     for split in ("train", "val"):
@@ -334,7 +348,7 @@ def main():
 
     for split in ("train", "val"):
         if not convert_bdd_to_coco(
-            bdd_json_path=os.path.join(dest_dir, "labels", "det_20", f"det_{split}.json"),
+            bdd_json_path=label_paths[split],
             coco_json_path=os.path.join(annotations_dir, f"bdd100k_det_{split}_coco.json"),
             image_dir=Path(dest_dir) / "images" / "100k" / split,
         ):

@@ -29,6 +29,10 @@ subdirectory paths so the training loader can open them. Only images referenced
 by the split's detection labels become training/evaluation samples.
 For data already extracted by the script, run
 `python -m tools.download_bdd100k --convert-only` to regenerate COCO annotations.
+Labels can also remain in the original local release directory:
+`data/bdd100k/bdd100k_labels_release/bdd100k/labels/bdd100k_labels_images_train.json`
+and `bdd100k_labels_images_val.json` in the same directory. The converter detects
+these automatically when normalized `labels/det_20/` files are absent.
 
 Expected layout:
 
