@@ -130,6 +130,10 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-interval", type=int, default=100)
+    parser.add_argument(
+        "--debug-first-batch", action="store_true",
+        help="Log first-batch stages with CUDA synchronization to locate stalls.",
+    )
     parser.add_argument("--wandb-project", default="fastvit-bdd100k")
     parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--wandb-entity", default=None)
@@ -463,6 +467,7 @@ def main():
             log_interval=args.log_interval,
             scheduler=scheduler,
             wandb_run=wandb_run,
+            debug_first_batch=args.debug_first_batch,
         )
         logger.info("Epoch %d metrics: %s", epoch, train_metrics)
 

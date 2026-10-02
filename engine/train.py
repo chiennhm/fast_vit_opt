@@ -30,6 +30,7 @@ def train_one_epoch(
     log_interval=100,
     scheduler=None,
     wandb_run=None,
+    debug_first_batch=False,
 ):
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -37,6 +38,14 @@ def train_one_epoch(
     totals = {"cls_loss": 0.0, "reg_loss": 0.0, "samples": 0}
     num_batches = len(dataloader)
     start_time = time.time()
+    logger.info("Epoch %d: waiting for first batch from DataLoader", epoch)
+
+    def first_batch_stage(message):
+        if debug_first_batch:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            logger.info("First batch: %s (elapsed %.1fs)", message, time.time() - start_time)
+
     progress = tqdm(
         enumerate(dataloader),
         total=num_batches,
@@ -45,6 +54,9 @@ def train_one_epoch(
     )
 
     for batch_idx, (images, targets) in progress:
+        if batch_idx == 0:
+            logger.info("First batch received: images=%s", tuple(images.shape))
+            first_batch_stage("starting transfer to device")
         images = images.to(device, non_blocking=True)
         targets = [
             {key: value.to(device, non_blocking=True) for key, value in target.items()}
@@ -55,11 +67,17 @@ def train_one_epoch(
         window_size = min(accum_steps, num_batches - window_start)
         use_amp = amp and device.type == "cuda"
         with autocast("cuda", enabled=use_amp):
+            if batch_idx == 0:
+                first_batch_stage("starting model forward")
             cls_preds, reg_preds, anchors = model(images)
+            if batch_idx == 0:
+                first_batch_stage(f"starting loss; anchors={anchors.shape[0]}")
             loss_dict = criterion(cls_preds, reg_preds, anchors, targets)
             unscaled_loss = loss_dict["cls_loss"] + loss_dict["reg_loss"]
             loss = unscaled_loss / window_size
 
+        if batch_idx == 0:
+            first_batch_stage("starting backward")
         if scaler is not None:
             scaler.scale(loss).backward()
         else:
@@ -68,6 +86,8 @@ def train_one_epoch(
         should_step = (batch_idx + 1) % accum_steps == 0 or batch_idx + 1 == num_batches
         grad_norm = None
         if should_step:
+            if batch_idx == 0:
+                first_batch_stage("starting optimizer update")
             if scaler is not None:
                 scaler.unscale_(optimizer)
             if clip_grad:
@@ -109,7 +129,9 @@ def train_one_epoch(
                 reg=f"{reg_value:.4f}",
                 pos=loss_dict["num_pos"],
             )
-        elif (batch_idx + 1) % log_interval == 0 or batch_idx + 1 == num_batches:
+        if batch_idx == 0:
+            first_batch_stage("complete")
+        if batch_idx == 0 or (batch_idx + 1) % log_interval == 0 or batch_idx + 1 == num_batches:
             elapsed = time.time() - start_time
             logger.info(
                 "Epoch %d [%d/%d] loss=%.4f pos=%s elapsed=%.1fs",

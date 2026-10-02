@@ -2,7 +2,45 @@ import unittest
 
 import torch
 
-from detection.losses import DetectionLoss, QualityFocalLoss
+from detection.losses import DetectionLoss, QualityFocalLoss, _match_unique_anchors
+
+
+class UniqueAnchorMatchingTest(unittest.TestCase):
+    def test_matches_greedy_reference_with_collisions(self):
+        devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+        # All GTs initially prefer anchor 0; they must claim different rows.
+        overlaps = torch.tensor([
+            [0.99, 0.95, 0.91],
+            [0.85, 0.80, 0.75],
+            [0.65, 0.60, 0.55],
+            [0.45, 0.40, 0.35],
+        ])
+        for device in devices:
+            with self.subTest(device=device):
+                anchors, ground_truths = _match_unique_anchors(overlaps.to(device))
+                self.assertEqual(anchors.tolist(), [0, 1, 2])
+                self.assertEqual(ground_truths.tolist(), [0, 1, 2])
+                self.assertEqual(anchors.device.type, device)
+
+    def test_matches_previous_algorithm_without_ties(self):
+        overlaps = torch.rand(101, 12, generator=torch.Generator().manual_seed(42))
+        order = overlaps.max(dim=0).values.argsort(descending=True).tolist()
+        expected = []
+        for gt in order:
+            candidates = overlaps[:, gt].argsort(descending=True).tolist()
+            expected.append(next(index for index in candidates if index not in expected))
+        anchors, ground_truths = _match_unique_anchors(overlaps)
+        self.assertEqual(anchors.tolist(), expected)
+        self.assertEqual(ground_truths.tolist(), order)
+
+    def test_zero_iou_still_assigns_distinct_anchors(self):
+        anchors, ground_truths = _match_unique_anchors(torch.zeros(4, 3))
+        self.assertEqual(anchors.unique().numel(), 3)
+        self.assertEqual(sorted(ground_truths.tolist()), [0, 1, 2])
+
+    def test_insufficient_anchors_reports_error(self):
+        with self.assertRaisesRegex(ValueError, "fewer valid anchors"):
+            _match_unique_anchors(torch.zeros(1, 2))
 
 
 class QualityFocalLossTest(unittest.TestCase):

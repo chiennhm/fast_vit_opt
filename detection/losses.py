@@ -494,6 +494,29 @@ class DistributionFocalLoss(nn.Module):
         return loss
 
 
+def _match_unique_anchors(iou):
+    """Greedily reserve one anchor per GT, keeping all indices on device.
+
+    Process GTs by descending best IoU, then select the best unclaimed anchor.
+    Tied anchors use the first row, rather than an unspecified argsort tie order.
+    """
+    num_anchors, num_gt = iou.shape
+    if num_anchors < num_gt:
+        raise ValueError("Cannot assign distinct anchors: fewer valid anchors than GT boxes")
+    if num_gt == 0:
+        empty = torch.empty(0, dtype=torch.long, device=iou.device)
+        return empty, empty
+    gt_order = iou.max(dim=0).values.argsort(descending=True)
+    claimed = torch.zeros(num_anchors, dtype=torch.bool, device=iou.device)
+    selected = []
+    for gt_index in gt_order.unbind():
+        scores = iou.index_select(1, gt_index.reshape(1)).squeeze(1)
+        anchor_index = scores.masked_fill(claimed, -1).argmax()
+        selected.append(anchor_index)
+        claimed.scatter_(0, anchor_index.reshape(1), True)
+    return torch.stack(selected), gt_order
+
+
 class DetectionLoss(nn.Module):
     """Configurable classification loss + CIoU with fixed-IoU matching.
 
@@ -645,25 +668,11 @@ class DetectionLoss(nn.Module):
             if valid_anchor_indices.numel() == 0:
                 raise RuntimeError("No valid anchors remain inside the resized image")
             valid_iou = iou[valid_anchor_indices]
-            gt_max_iou = valid_iou.max(dim=0).values
-            claimed_anchors = set()
-            gt_order = torch.argsort(gt_max_iou, descending=True).tolist()
-            for gt_i in gt_order:
-                ranked_local = torch.argsort(
-                    valid_iou[:, gt_i], descending=True
-                ).tolist()
-                ranked_anchors = [
-                    int(valid_anchor_indices[index]) for index in ranked_local
-                ]
-                anchor_i = next(
-                    candidate
-                    for candidate in ranked_anchors
-                    if candidate not in claimed_anchors
-                )
-                claimed_anchors.add(anchor_i)
-                cls_targets[anchor_i] = gt_labels[gt_i]
-                max_idx[anchor_i] = gt_i  # keep regression target consistent
-                pos_mask[anchor_i] = True
+            local_indices, gt_order = _match_unique_anchors(valid_iou)
+            forced_anchors = valid_anchor_indices[local_indices]
+            cls_targets[forced_anchors] = gt_labels[gt_order]
+            max_idx[forced_anchors] = gt_order  # keep regression target consistent
+            pos_mask[forced_anchors] = True
 
             num_pos = pos_mask.sum().item()
             total_pos += num_pos
