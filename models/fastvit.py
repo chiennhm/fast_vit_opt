@@ -30,7 +30,6 @@ from models.modules.mobileone import MobileOneBlock
 from models.modules.replknet import ReparamLargeKernelConv
 
 try:
-    from mmseg.models.builder import BACKBONES as seg_BACKBONES
     from mmseg.utils import get_root_logger
     from mmcv.runner import _load_checkpoint
 
@@ -40,7 +39,6 @@ except ImportError:
     has_mmseg = False
 
 try:
-    from mmdet.models.builder import BACKBONES as det_BACKBONES
     from mmdet.utils import get_root_logger
     from mmcv.runner import _load_checkpoint
 

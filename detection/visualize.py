@@ -7,21 +7,42 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import os
 
-
-# VOC class names
-VOC_CLASSES = [
-    "aeroplane", "bicycle", "bird", "boat", "bottle",
-    "bus", "car", "cat", "chair", "cow",
-    "diningtable", "dog", "horse", "motorbike", "person",
-    "pottedplant", "sheep", "sofa", "train", "tvmonitor",
+# BDD100K class names (1-indexed labels map to this zero-indexed list).
+BDD100K_CLASSES = [
+    "bike",
+    "bus",
+    "car",
+    "motor",
+    "person",
+    "rider",
+    "traffic light",
+    "traffic sign",
+    "train",
+    "truck",
 ]
 
 # Color palette for each class (distinct colors)
 CLASS_COLORS = [
-    (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255),
-    (0, 255, 255), (128, 0, 0), (0, 128, 0), (0, 0, 128), (128, 128, 0),
-    (128, 0, 128), (0, 128, 128), (255, 128, 0), (255, 0, 128), (128, 255, 0),
-    (0, 255, 128), (128, 0, 255), (0, 128, 255), (255, 128, 128), (128, 255, 128),
+    (255, 0, 0),
+    (0, 255, 0),
+    (0, 0, 255),
+    (255, 255, 0),
+    (255, 0, 255),
+    (0, 255, 255),
+    (128, 0, 0),
+    (0, 128, 0),
+    (0, 0, 128),
+    (128, 128, 0),
+    (128, 0, 128),
+    (0, 128, 128),
+    (255, 128, 0),
+    (255, 0, 128),
+    (128, 255, 0),
+    (0, 255, 128),
+    (128, 0, 255),
+    (0, 128, 255),
+    (255, 128, 128),
+    (128, 255, 128),
 ]
 
 
@@ -49,10 +70,10 @@ def draw_detections(
         PIL Image with drawn detections
     """
     if class_names is None:
-        class_names = VOC_CLASSES
+        class_names = BDD100K_CLASSES
 
     if isinstance(image, torch.Tensor):
-        image = image.cpu()
+        image = image.detach().cpu()
         if image.dim() == 3 and image.shape[0] == 3:
             image = image.permute(1, 2, 0)
         image = image.numpy()
@@ -66,11 +87,11 @@ def draw_detections(
         image = Image.fromarray(image)
 
     if isinstance(boxes, torch.Tensor):
-        boxes = boxes.cpu().numpy()
+        boxes = boxes.detach().cpu().numpy()
     if isinstance(labels, torch.Tensor):
-        labels = labels.cpu().numpy()
+        labels = labels.detach().cpu().numpy()
     if scores is not None and isinstance(scores, torch.Tensor):
-        scores = scores.cpu().numpy()
+        scores = scores.detach().cpu().numpy()
 
     draw = ImageDraw.Draw(image)
 
@@ -97,7 +118,9 @@ def draw_detections(
             )
 
         # Label text
-        cls_name = class_names[label - 1] if label - 1 < len(class_names) else f"cls_{label}"
+        cls_name = (
+            class_names[label - 1] if label - 1 < len(class_names) else f"cls_{label}"
+        )
         if scores is not None:
             text = f"{cls_name}: {scores[i]:.2f}"
         else:
