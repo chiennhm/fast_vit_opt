@@ -167,24 +167,27 @@ def convert_bdd_to_coco(bdd_json_path, coco_json_path, image_dir=None):
     if image_index is not None:
         print(f"Found {sum(map(len, image_index.values()))} images under {image_root}")
 
+    # Keep this order aligned with BDD100K_CLASSES. Numeric IDs are part of
+    # the checkpoint contract, so names must describe the semantics that were
+    # actually assigned during conversion.
     categories = [
-        {"id": 1, "name": "pedestrian"},
+        {"id": 1, "name": "person"},
         {"id": 2, "name": "rider"},
         {"id": 3, "name": "car"},
         {"id": 4, "name": "truck"},
         {"id": 5, "name": "bus"},
         {"id": 6, "name": "train"},
-        {"id": 7, "name": "motorcycle"},
-        {"id": 8, "name": "bicycle"},
+        {"id": 7, "name": "motor"},
+        {"id": 8, "name": "bike"},
         {"id": 9, "name": "traffic light"},
         {"id": 10, "name": "traffic sign"},
     ]
 
     cat_to_id = {cat["name"]: cat["id"] for cat in categories}
     alt_name_map = {
-        "person": "pedestrian",
-        "bike": "bicycle",
-        "motor": "motorcycle",
+        "pedestrian": "person",
+        "bicycle": "bike",
+        "motorcycle": "motor",
     }
 
     coco_images = []

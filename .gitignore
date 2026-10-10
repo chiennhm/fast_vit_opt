@@ -158,3 +158,6 @@ code.zip
 data/*
 docs/*
 research/*
+experiments/*
+checkpoints/*
+

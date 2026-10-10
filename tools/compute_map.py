@@ -32,16 +32,16 @@ import matplotlib.pyplot as plt
 # Category Definitions (1-indexed category_id 1..10 mapped to index 0..9)
 # ============================================================================
 BDD100K_CLASSES = [
-    "bike",          # cat_id 1
-    "bus",           # cat_id 2
+    "person",        # cat_id 1
+    "rider",         # cat_id 2
     "car",           # cat_id 3
-    "motor",         # cat_id 4
-    "person",        # cat_id 5
-    "rider",         # cat_id 6
-    "traffic light", # cat_id 7
-    "traffic sign",  # cat_id 8
-    "train",         # cat_id 9
-    "truck",         # cat_id 10
+    "truck",         # cat_id 4
+    "bus",           # cat_id 5
+    "train",         # cat_id 6
+    "motor",         # cat_id 7
+    "bike",          # cat_id 8
+    "traffic light", # cat_id 9
+    "traffic sign",  # cat_id 10
 ]
 
 # ============================================================================

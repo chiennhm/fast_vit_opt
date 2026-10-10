@@ -32,8 +32,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 # Category Definitions
 BDD100K_CLASSES = [
-    "bike", "bus", "car", "motor", "person",
-    "rider", "traffic light", "traffic sign", "train", "truck"
+    "person", "rider", "car", "truck", "bus",
+    "train", "motor", "bike", "traffic light", "traffic sign"
 ]
 
 logging.basicConfig(

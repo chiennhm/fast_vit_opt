@@ -9,16 +9,16 @@ import os
 
 # BDD100K class names (1-indexed labels map to this zero-indexed list).
 BDD100K_CLASSES = [
-    "bike",
-    "bus",
-    "car",
-    "motor",
     "person",
     "rider",
+    "car",
+    "truck",
+    "bus",
+    "train",
+    "motor",
+    "bike",
     "traffic light",
     "traffic sign",
-    "train",
-    "truck",
 ]
 
 # Color palette for each class (distinct colors)

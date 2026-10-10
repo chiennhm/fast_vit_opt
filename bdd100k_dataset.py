@@ -13,20 +13,25 @@ import random
 from collections import defaultdict
 
 BDD100K_CLASSES = [
-    "bike",
-    "bus",
-    "car",
-    "motor",
     "person",
     "rider",
+    "car",
+    "truck",
+    "bus",
+    "train",
+    "motor",
+    "bike",
     "traffic light",
     "traffic sign",
-    "train",
-    "truck",
 ]
 
 BDD100K_CAT_IDS = list(range(1, 11))
 BDD100K_CAT_TO_IDX = {cat_id: cat_id for cat_id in BDD100K_CAT_IDS}
+BDD100K_CATEGORY_ALIASES = {
+    "pedestrian": "person",
+    "motorcycle": "motor",
+    "bicycle": "bike",
+}
 
 
 def filter_and_clip_boxes(boxes, img_w, img_h, labels, iscrowd):
@@ -83,9 +88,8 @@ class BDD100KDetectionDataset(Dataset):
         with open(ann_file, "r", encoding="utf-8") as f:
             coco_data = json.load(f)
 
-        declared_category_ids = {
-            int(category["id"]) for category in coco_data.get("categories", [])
-        }
+        declared_categories = coco_data.get("categories", [])
+        declared_category_ids = {int(category["id"]) for category in declared_categories}
         expected_category_ids = set(BDD100K_CAT_IDS)
         if declared_category_ids != expected_category_ids:
             missing = sorted(expected_category_ids - declared_category_ids)
@@ -93,6 +97,22 @@ class BDD100KDetectionDataset(Dataset):
             raise ValueError(
                 "BDD100K detection JSON must declare exactly category IDs 1..10; "
                 f"missing={missing}, unexpected={unexpected}"
+            )
+        declared_names = {
+            int(category["id"]): BDD100K_CATEGORY_ALIASES.get(
+                str(category["name"]).strip().lower(),
+                str(category["name"]).strip().lower(),
+            )
+            for category in declared_categories
+        }
+        expected_names = {
+            category_id: BDD100K_CLASSES[category_id - 1]
+            for category_id in BDD100K_CAT_IDS
+        }
+        if declared_names != expected_names:
+            raise ValueError(
+                "BDD100K category names do not match their numeric IDs; "
+                f"expected={expected_names}, declared={declared_names}"
             )
 
         # Build lookup tables

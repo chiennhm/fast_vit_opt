@@ -5,7 +5,11 @@ from pathlib import Path
 
 from PIL import Image
 
-from bdd100k_dataset import BDD100KDetectionDataset, bdd100k_collate
+from bdd100k_dataset import (
+    BDD100K_CLASSES,
+    BDD100KDetectionDataset,
+    bdd100k_collate,
+)
 
 
 class BDD100KDatasetTest(unittest.TestCase):
@@ -26,12 +30,7 @@ class BDD100KDatasetTest(unittest.TestCase):
                 ],
                 "categories": [
                     {"id": index + 1, "name": name}
-                    for index, name in enumerate(
-                        [
-                            "bike", "bus", "car", "motor", "person", "rider",
-                            "traffic light", "traffic sign", "train", "truck",
-                        ]
-                    )
+                    for index, name in enumerate(BDD100K_CLASSES)
                 ],
             }
             annotation_path = root / "labels.json"

@@ -9,6 +9,11 @@ from unittest.mock import patch
 
 from tools import download_bdd100k as downloader
 
+EXPECTED_CLASSES = [
+    "person", "rider", "car", "truck", "bus",
+    "train", "motor", "bike", "traffic light", "traffic sign",
+]
+
 
 class DownloadBDD100KTest(unittest.TestCase):
     def make_archive(self, path, include_images=True):
@@ -54,6 +59,40 @@ class DownloadBDD100KTest(unittest.TestCase):
                 )
                 self.assertEqual(result["annotations"][0]["bbox"], [10, 20, 30, 40])
                 self.assertEqual(result["annotations"][0]["category_id"], 1)
+                self.assertEqual(
+                    [category["name"] for category in result["categories"]],
+                    EXPECTED_CLASSES,
+                )
+
+    def test_converter_preserves_training_category_id_semantics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            labels = root / "labels.json"
+            output = root / "coco.json"
+            source_names = EXPECTED_CLASSES + ["pedestrian", "motorcycle", "bicycle"]
+            labels.write_text(json.dumps([{
+                "name": "one.jpg",
+                "labels": [
+                    {
+                        "category": name,
+                        "box2d": {"x1": index, "y1": 1, "x2": index + 2, "y2": 3},
+                    }
+                    for index, name in enumerate(source_names, start=1)
+                ],
+            }]), encoding="utf-8")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(downloader.convert_bdd_to_coco(labels, output))
+
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [category["name"] for category in result["categories"]],
+                EXPECTED_CLASSES,
+            )
+            self.assertEqual(
+                [annotation["category_id"] for annotation in result["annotations"]],
+                list(range(1, 11)) + [1, 7, 8],
+            )
 
     def test_incomplete_archive_is_not_marked_ready(self):
         with tempfile.TemporaryDirectory() as directory:

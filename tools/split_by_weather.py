@@ -33,16 +33,16 @@ logging.basicConfig(
 logger = logging.getLogger("split_bdd100k_by_weather")
 
 BDD100K_CATEGORIES = [
-    {"id": 1, "name": "bike"},
-    {"id": 2, "name": "bus"},
+    {"id": 1, "name": "person"},
+    {"id": 2, "name": "rider"},
     {"id": 3, "name": "car"},
-    {"id": 4, "name": "motor"},
-    {"id": 5, "name": "person"},
-    {"id": 6, "name": "rider"},
-    {"id": 7, "name": "traffic light"},
-    {"id": 8, "name": "traffic sign"},
-    {"id": 9, "name": "train"},
-    {"id": 10, "name": "truck"},
+    {"id": 4, "name": "truck"},
+    {"id": 5, "name": "bus"},
+    {"id": 6, "name": "train"},
+    {"id": 7, "name": "motor"},
+    {"id": 8, "name": "bike"},
+    {"id": 9, "name": "traffic light"},
+    {"id": 10, "name": "traffic sign"},
 ]
 
 
