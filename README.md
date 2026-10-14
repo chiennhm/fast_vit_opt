@@ -76,6 +76,11 @@ bash scripts/resume.sh PATH/last.pth 8 ./data/bdd100k fastvit_sa12
 bash scripts/pipeline.sh fastvit_sa12 8 800 50 ./data/bdd100k
 ```
 
+For a Linux H200 server, run [setup](scripts/setup_h200.sh) to clone `refactor-bdd`
+and prepare the venv, then [download](scripts/download_h200.sh) to prepare data
+and ImageNet weights. Submit [run](scripts/run_h200.sh) through SLURM for offline
+training, checkpoint resume or evaluation. See [H200 setup and commands](scripts/README_H200.md).
+
 ## Analysis and deployment tools
 
 ```bash
