@@ -1,4 +1,5 @@
 scripts/run_h200.sh text eol=lf
+scripts/resume_h200.sh text eol=lf
 scripts/setup_h200.sh text eol=lf
 scripts/download_h200.sh text eol=lf
 scripts/train.sh text eol=lf

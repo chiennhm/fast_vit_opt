@@ -57,7 +57,7 @@ class H200ShellPythonTest(unittest.TestCase):
     def test_inline_python_syntax_and_lf(self):
         for script in (SCRIPT, SETUP_SCRIPT, DOWNLOAD_SCRIPT):
             self.assertNotIn(b"\r", script.read_bytes())
-        for marker in ("PY_GPU", "PY_RECIPE", "PY_DATA", "PY_PRETRAINED", "PY_BACKBONE"):
+        for marker in ("PY_GPU", "PY_RECIPE", "PY_DATA", "PY_PRETRAINED", "PY_BACKBONE", "PY_WEATHER"):
             ast.parse(embedded_python(marker), filename=f"{SCRIPT}:{marker}")
         download_audit = re.search(r"<<'PY_DATA'\n(.*?)\nPY_DATA\n", DOWNLOAD_SOURCE, re.S)
         self.assertEqual(embedded_python("PY_DATA"), download_audit.group(1))
@@ -385,6 +385,31 @@ class H200ShellCliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(log.exists())
             self.assertIn("Runtime log (file only)", result.stdout)
+
+    def test_epoch_logging_default_and_diagnostic_opt_out(self):
+        for options, expected in (([], True), (["--no-epoch-log-only"], False),
+                                  (["--no-epoch-log-only", "--epoch-log-only"], True)):
+            with self.subTest(options=options):
+                result = self.run_shell("--checkpoint", "last.pth", *options, "--dry-run")
+                argv = self.dry_run_args(result)
+                self.assertEqual("--epoch-log-only" in argv, expected)
+
+    def test_final_suite_defaults_and_custom_thresholds(self):
+        argv = self.dry_run_args(self.run_shell("--checkpoint", "last.pth", "--dry-run"))
+        self.assertIn("--post-train-eval", argv)
+        start = argv.index("--confidence-thresholds") + 1
+        self.assertEqual(argv[start:start + 9],
+                         ["0.001", "0.01", "0.05", "0.1", "0.2", "0.3", "0.5", "0.7", "0.9"])
+        argv = self.dry_run_args(self.run_shell(
+            "--checkpoint", "last.pth", "--confidence-thresholds", "0.01,0.05,0.5",
+            "--weather-labels", "/data/raw val.json", "--dry-run"))
+        start = argv.index("--confidence-thresholds") + 1
+        self.assertEqual(argv[start:start + 3], ["0.01", "0.05", "0.5"])
+        self.assertEqual(argv[argv.index("--weather-labels") + 1], "/data/raw val.json")
+        argv = self.dry_run_args(self.run_shell(
+            "--checkpoint", "last.pth", "--no-post-train-eval", "--dry-run"))
+        self.assertNotIn("--post-train-eval", argv)
+        self.assertNotIn("--confidence-thresholds", argv)
 
     def run_job_tail(self, temp, job_code):
         # Run the actual exit-code section, with a tiny fake training job.

@@ -67,6 +67,13 @@ Training/evaluation:
   --max-detections N              Default: 100
   --pre-nms-topk N                Default: 2000
   --max-eval-samples N            Smoke test only, not full-val metrics
+  --epoch-log-only               Default: epoch summaries; no batch logs/progress
+  --no-epoch-log-only            Restore per-batch logging/progress for diagnostics
+  --post-train-eval              Default: final overall/weather/confidence evaluation
+  --no-post-train-eval           Skip the final analysis suite
+  --weather-labels FILE          Raw BDD100K val labels with attributes.weather;
+                                default: locate automatically under DATA_DIR
+  --confidence-thresholds CSV     Default: 0.001,0.01,0.05,0.1,0.2,0.3,0.5,0.7,0.9
   --prepare-only                 Offline preflight without training/evaluation
   --dry-run                      Print plan, no writes/network/Python/GPU
   -h, --help
@@ -110,6 +117,10 @@ PRE_NMS_TOPK=2000
 MAX_EVAL_SAMPLES=
 ALLOW_OTHER_GPU=0
 PREPARE_ONLY=0
+EPOCH_LOG_ONLY=1
+POST_TRAIN_EVAL=1
+WEATHER_LABELS=
+CONFIDENCE_THRESHOLDS=0.001,0.01,0.05,0.1,0.2,0.3,0.5,0.7,0.9
 DRY_RUN=0
 LOG_FILE=
 GPU_EXPLICIT=0
@@ -137,12 +148,16 @@ while (( $# )); do
       die "$1 belongs to download_h200.sh; run it before submitting this job" ;;
     --allow-other-gpu) ALLOW_OTHER_GPU=1; shift ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
+    --epoch-log-only) EPOCH_LOG_ONLY=1; shift ;;
+    --no-epoch-log-only) EPOCH_LOG_ONLY=0; shift ;;
+    --post-train-eval) POST_TRAIN_EVAL=1; shift ;;
+    --no-post-train-eval) POST_TRAIN_EVAL=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --mode|--work-dir|--venv|--log-file|--checkpoint|\
     --pretrained-backbone|--model|--data-dir|--train-img|--train-ann|--val-img|\
     --val-ann|--epochs|--batch-size|--accum-steps|--eval-batch-size|\
     --workers|--gpu|--score-thresh|--nms-thresh|--max-detections|--pre-nms-topk|\
-    --max-eval-samples)
+    --max-eval-samples|--weather-labels|--confidence-thresholds)
       need_value "$@"
       case "$1" in
         --mode) MODE="$2" ;; --work-dir) WORK_DIR="$2" ;; --venv) VENV_DIR="$2" ;;
@@ -159,6 +174,8 @@ while (( $# )); do
         --score-thresh) SCORE_THRESH="$2" ;; --nms-thresh) NMS_THRESH="$2" ;;
         --max-detections) MAX_DETECTIONS="$2" ;; --pre-nms-topk) PRE_NMS_TOPK="$2" ;;
         --max-eval-samples) MAX_EVAL_SAMPLES="$2" ;;
+        --weather-labels) WEATHER_LABELS="$2" ;;
+        --confidence-thresholds) CONFIDENCE_THRESHOLDS="$2" ;;
       esac
       shift 2 ;;
     *) die "Unknown argument: $1 (see --help)" ;;
@@ -218,6 +235,7 @@ VAL_IMG="$(absolute_path "${VAL_IMG:-$DATA_DIR/images/100k/val}")"
 VAL_ANN="$(absolute_path "${VAL_ANN:-$DATA_DIR/annotations/bdd100k_det_val_coco.json}")"
 [[ -z "$CHECKPOINT" ]] || CHECKPOINT="$(absolute_path "$CHECKPOINT")"
 [[ -z "$PRETRAINED" ]] || PRETRAINED="$(absolute_path "$PRETRAINED")"
+[[ -z "$WEATHER_LABELS" ]] || WEATHER_LABELS="$(absolute_path "$WEATHER_LABELS")"
 if (( SLURM_MODE )) && [[ -z "$LOG_FILE" ]]; then
   # Match the literal SBATCH stdout/stderr path so there is one runtime log.
   LOG_FILE="/datastore/locth/ChienAnh/logs/fastvit_${SLURM_JOB_ID}.log"
@@ -238,6 +256,13 @@ INIT_ARGS=()
 [[ -z "$PRETRAINED" ]] || INIT_ARGS=(--pretrained-backbone "$PRETRAINED")
 [[ -z "$MAX_EVAL_SAMPLES" ]] || TRAIN_ARGS+=(--max-eval-samples "$MAX_EVAL_SAMPLES")
 [[ "$MODE" != eval ]] || TRAIN_ARGS+=(--eval-only)
+(( ! EPOCH_LOG_ONLY )) || TRAIN_ARGS+=(--epoch-log-only)
+if (( POST_TRAIN_EVAL )); then
+  IFS=, read -r -a CONFIDENCE_VALUES <<< "$CONFIDENCE_THRESHOLDS"
+  (( ${#CONFIDENCE_VALUES[@]} )) || die "--confidence-thresholds cannot be empty"
+  TRAIN_ARGS+=(--post-train-eval --confidence-thresholds "${CONFIDENCE_VALUES[@]}")
+  [[ -z "$WEATHER_LABELS" ]] || TRAIN_ARGS+=(--weather-labels "$WEATHER_LABELS")
+fi
 
 # Use the entrypoints inside the prepared clone, not sibling files beside this
 # launcher (Slurm may copy only run_h200.sh into its spool directory).
@@ -292,6 +317,13 @@ command -v git >/dev/null || die "Missing program: git"
 # ignore extra arguments and could start a different training recipe.
 if [[ ! -f "$SOURCE_WRAPPER" ]] || [[ "$(< "$SOURCE_WRAPPER")" != *"# FASTVIT_TRAINER_ARGS_V1"* ]]; then
   die "Prepared source needs updated scripts/train.sh and scripts/resume.sh (FASTVIT_TRAINER_ARGS_V1). Push them to refactor-bdd, then rerun setup_h200.sh before submitting."
+fi
+if (( EPOCH_LOG_ONLY )) && [[ "$(< "$SOURCE_DIR/train_bdd100k.py")" != *'"--epoch-log-only"'* ]]; then
+  die "Prepared source lacks --epoch-log-only. Update train_bdd100k.py, engine/train.py and engine/evaluate.py from refactor-bdd before submitting."
+fi
+if (( POST_TRAIN_EVAL )); then
+  [[ -f "$SOURCE_DIR/engine/evaluation_suite.py" && "$(< "$SOURCE_DIR/train_bdd100k.py")" == *'"--post-train-eval"'* ]] \
+    || die "Prepared source needs the final evaluation suite; update source from refactor-bdd before submitting"
 fi
 [[ -z "$CHECKPOINT" || -f "$CHECKPOINT" ]] || die "Checkpoint does not exist on server: $CHECKPOINT"
 if [[ -n "$PRETRAINED" ]]; then
@@ -498,6 +530,26 @@ for split, root, ann in splits:
 Path(output).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 print(json.dumps(report, indent=2))
 PY_DATA
+if (( POST_TRAIN_EVAL )); then
+  (cd "$SOURCE_DIR" && "$ENV_PYTHON" - "$DATA_DIR" "$VAL_ANN" "$WEATHER_LABELS" \
+    "$CONFIDENCE_THRESHOLDS" "$LAUNCH_DIR/weather.json" <<'PY_WEATHER'
+import json, sys
+from pathlib import Path
+from engine.evaluation_suite import prepare_weather_groups
+data_dir, val_ann, raw_labels, confidence_csv, report_path = sys.argv[1:]
+thresholds = [float(value) for value in confidence_csv.split(",")]
+if any(not 0 <= value <= 1 for value in thresholds):
+    raise ValueError("Confidence thresholds must be finite and between 0 and 1")
+with open(val_ann, encoding="utf-8") as handle:
+    images = json.load(handle)["images"]
+groups, raw_path = prepare_weather_groups(images, data_dir, raw_labels or None)
+report = {"raw_labels": raw_path, "confidence_thresholds": thresholds,
+          "weather_images": {key: len(value) for key, value in groups.items()}}
+Path(report_path).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+print(json.dumps(report, indent=2))
+PY_WEATHER
+  )
+fi
 [[ -z "$MAX_EVAL_SAMPLES" ]] || printf 'WARNING: subset evaluation is not a full-val benchmark.\n'
 "$ENV_PYTHON" -m pip freeze > "$LAUNCH_DIR/packages.txt"
 JOB=("${JOB_PREFIX[@]}" "${RECIPE_ARGS[@]}" "${TRAIN_ARGS[@]}" "${INIT_ARGS[@]}")

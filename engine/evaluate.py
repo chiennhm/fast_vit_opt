@@ -150,13 +150,19 @@ def evaluate(
     save_json=False,
     json_output_dir=None,
     model_name="fastvit_sa12",
+    show_progress=True,
+    return_records=False,
 ):
+    """Return metrics, or (metrics, predictions, targets) for cached analysis."""
     model.eval()
     predictions_all = []
     ground_truths_all = []
     images_seen = 0
 
-    progress = tqdm(dataloader, total=len(dataloader), desc="Evaluating", leave=False)
+    progress = tqdm(
+        dataloader, total=len(dataloader), desc="Evaluating", leave=False,
+        disable=not show_progress,
+    )
     for batch_index, (images, targets) in enumerate(progress):
         if max_samples is not None:
             remaining = max_samples - images_seen
@@ -247,4 +253,6 @@ def evaluate(
         output_path = Path(output_dir) / "eval_results.json"
         output_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
+    if return_records:
+        return results, predictions_all, ground_truths_all
     return results

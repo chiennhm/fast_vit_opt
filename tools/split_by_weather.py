@@ -48,36 +48,47 @@ BDD100K_CATEGORIES = [
 
 def sanitize_weather_name(name):
     """Normalize weather attribute name to lowercase string without spaces."""
-    if not name or name == "unknown":
+    name = str(name or "").strip().lower()
+    if name in ("", "unknown"):
         return "undefined"
-    name = str(name).strip().lower().replace(" ", "_")
-    return name
+    return name.replace(" ", "_")
 
 
-def load_weather_attribute_map(raw_label_path):
+def load_weather_attribute_map(raw_label_path, strict=False):
     """
     Map image file_name/name -> weather attribute from raw BDD100K JSON file.
     """
     if not os.path.exists(raw_label_path):
+        if strict:
+            raise FileNotFoundError(f"Raw BDD100K weather labels not found: {raw_label_path}")
         logger.error(f"Raw BDD100K label file not found: {raw_label_path}")
         return {}
 
     logger.info(f"Loading raw BDD100K labels from: {raw_label_path}")
     with open(raw_label_path, "r", encoding="utf-8") as f:
         raw_items = json.load(f)
+    if strict and not isinstance(raw_items, list):
+        raise ValueError(f"Raw BDD100K weather labels must be a list: {raw_label_path}")
 
     weather_map = {}
     weather_counts = Counter()
+    seen_basenames = set()
 
     for item in raw_items:
         img_name = item.get("name")
-        attrs = item.get("attributes", {})
+        attrs = item.get("attributes") or {}
+        if strict and (not img_name or "weather" not in attrs):
+            raise ValueError(f"Missing image name or attributes.weather in {raw_label_path}")
         weather_raw = attrs.get("weather", "undefined")
         weather = sanitize_weather_name(weather_raw)
 
         if img_name:
+            img_name = str(img_name).replace(chr(92), "/")
+            base_name = img_name.rsplit("/", 1)[-1]
+            if strict and base_name in seen_basenames:
+                raise ValueError(f"Ambiguous/duplicate weather image basename: {base_name}")
+            seen_basenames.add(base_name)
             weather_map[img_name] = weather
-            base_name = os.path.basename(img_name)
             weather_map[base_name] = weather
             weather_counts[weather] += 1
 

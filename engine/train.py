@@ -38,7 +38,9 @@ def train_one_epoch(
     totals = {"cls_loss": 0.0, "reg_loss": 0.0, "samples": 0}
     num_batches = len(dataloader)
     start_time = time.time()
-    logger.info("Epoch %d: waiting for first batch from DataLoader", epoch)
+    batch_logging = log_interval > 0
+    if batch_logging or debug_first_batch:
+        logger.info("Epoch %d: waiting for first batch from DataLoader", epoch)
 
     def first_batch_stage(message):
         if debug_first_batch:
@@ -51,11 +53,13 @@ def train_one_epoch(
         total=num_batches,
         desc=f"Epoch {epoch}",
         leave=False,
+        disable=not batch_logging,
     )
 
     for batch_idx, (images, targets) in progress:
         if batch_idx == 0:
-            logger.info("First batch received: images=%s", tuple(images.shape))
+            if batch_logging or debug_first_batch:
+                logger.info("First batch received: images=%s", tuple(images.shape))
             first_batch_stage("starting transfer to device")
         images = images.to(device, non_blocking=True)
         targets = [
@@ -123,7 +127,7 @@ def train_one_epoch(
                 payload["train/grad_norm"] = grad_norm
             wandb_run.log(payload, step=epoch * num_batches + batch_idx)
 
-        if hasattr(progress, "set_postfix"):
+        if batch_logging and hasattr(progress, "set_postfix"):
             progress.set_postfix(
                 cls=f"{cls_value:.4f}",
                 reg=f"{reg_value:.4f}",
@@ -131,7 +135,11 @@ def train_one_epoch(
             )
         if batch_idx == 0:
             first_batch_stage("complete")
-        if batch_idx == 0 or (batch_idx + 1) % log_interval == 0 or batch_idx + 1 == num_batches:
+        if batch_logging and (
+            batch_idx == 0
+            or (batch_idx + 1) % log_interval == 0
+            or batch_idx + 1 == num_batches
+        ):
             elapsed = time.time() - start_time
             logger.info(
                 "Epoch %d [%d/%d] loss=%.4f pos=%s elapsed=%.1fs",

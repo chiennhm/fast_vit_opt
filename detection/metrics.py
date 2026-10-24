@@ -145,6 +145,63 @@ def _mean_valid(values):
     return float(np.mean(valid)) if valid.size else None
 
 
+def summarize_detection_counts(tp, fp, fn):
+    """Micro operating-point metrics; no true negatives exist for detection."""
+    tp, fp, fn = int(tp), int(fp), int(fn)
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else None
+    f1 = 2 * tp / (2 * tp + fp + fn) if tp + fn else None
+    return {"TP": tp, "FP": fp, "FN": fn,
+            "precision": precision, "recall": recall, "f1": f1}
+
+
+def _add_operating_points(result, ground_truth, detections, class_names, evaluator=None):
+    """Reuse COCO's IoU=.50 matches/ignore masks, including crowd handling."""
+    by_image = {image["id"]: [0, 0, 0] for image in ground_truth["images"]}
+    by_class = {index: [0, 0, 0] for index in range(1, len(class_names) + 1)}
+    if evaluator is None:
+        # No detections or no GT: COCOeval has no evalImgs to inspect.
+        for ann in ground_truth["annotations"]:
+            if not ann.get("iscrowd", 0) and not ann.get("ignore", 0):
+                by_image[ann["image_id"]][2] += 1
+                by_class[ann["category_id"]][2] += 1
+        for row in detections:
+            by_image[row["image_id"]][1] += 1
+            by_class[row["category_id"]][1] += 1
+    else:
+        iou_indices = np.flatnonzero(np.isclose(evaluator.params.iouThrs, 0.5))
+        if not len(iou_indices):
+            raise ValueError("Operating-point counts require IoU 0.50")
+        iou_index = int(iou_indices[0])
+        for item in evaluator.evalImgs:
+            if item is None or list(item["aRng"]) != list(COCO_AREA_RANGES[0]):
+                continue
+            ignored = np.asarray(item["dtIgnore"][iou_index], dtype=bool)
+            matched = np.asarray(item["dtMatches"][iou_index]) > 0
+            tp = int(np.count_nonzero(matched & ~ignored))
+            fp = int(np.count_nonzero(~matched & ~ignored))
+            fn = int(np.count_nonzero(~np.asarray(item["gtIgnore"], dtype=bool))) - tp
+            for bucket in (by_image[item["image_id"]], by_class[item["category_id"]]):
+                bucket[0] += tp
+                bucket[1] += fp
+                bucket[2] += fn
+    totals = np.asarray(list(by_image.values()), dtype=np.int64).reshape(-1, 3).sum(axis=0)
+    result["operating_point"] = {
+        **summarize_detection_counts(*totals),
+        "iou_threshold": 0.5, "averaging": "micro",
+        "ignored_detections_excluded": True,
+    }
+    result["operating_points_by_image"] = {
+        str(image_id): summarize_detection_counts(*counts)
+        for image_id, counts in by_image.items()
+    }
+    for category_id, counts in by_class.items():
+        result["per_class"][class_names[category_id - 1]]["operating_point"] = (
+            summarize_detection_counts(*counts)
+        )
+    return result
+
+
 def _empty_results(class_names, ground_truth, thresholds, max_detections):
     gt_categories = {row["category_id"] for row in ground_truth["annotations"]}
     per_class = {
@@ -187,6 +244,7 @@ def evaluate_coco(
     iou_threshold=None,
     class_names=None,
     max_detections=COCO_MAX_DETECTIONS,
+    include_operating_points=False,
 ):
     """Evaluate bbox predictions with an explicit, canonical COCO protocol."""
     if not HAS_PYCOCOTOOLS:
@@ -216,35 +274,33 @@ def evaluate_coco(
     ground_truth = build_coco_ground_truth(
         ground_truths, num_classes, class_names
     )
+    detections = build_coco_predictions(predictions)
+    valid_image_ids = {image["id"] for image in ground_truth["images"]}
+    invalid_detection_ids = sorted({row["image_id"] for row in detections} - valid_image_ids)
+    if invalid_detection_ids:
+        raise ValueError(f"Predictions reference image IDs absent from ground truth: {invalid_detection_ids[:10]}")
     if not ground_truth["annotations"]:
         logger.warning("No ground-truth annotations; returning undefined class AP.")
-        return _empty_results(
+        result = _empty_results(
             class_names, ground_truth, thresholds, max_detections
         )
+        return (_add_operating_points(result, ground_truth, detections, class_names)
+                if include_operating_points else result)
 
     with contextlib.redirect_stdout(io.StringIO()):
         coco_gt = COCO()
         coco_gt.dataset = ground_truth
         coco_gt.createIndex()
 
-    detections = build_coco_predictions(predictions)
     if not detections:
         logger.warning("No detections; returning zero AP for classes with GT.")
-        return _empty_results(
+        result = _empty_results(
             class_names, ground_truth, thresholds, max_detections
         )
+        return (_add_operating_points(result, ground_truth, detections, class_names)
+                if include_operating_points else result)
 
     ground_truth_image_ids = [image["id"] for image in ground_truth["images"]]
-    valid_image_ids = set(ground_truth_image_ids)
-    invalid_detection_ids = sorted(
-        {row["image_id"] for row in detections} - valid_image_ids
-    )
-    if invalid_detection_ids:
-        raise ValueError(
-            "Predictions reference image IDs absent from ground truth: "
-            f"{invalid_detection_ids[:10]}"
-        )
-
     with contextlib.redirect_stdout(io.StringIO()):
         coco_dt = coco_gt.loadRes(detections)
         coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
@@ -326,7 +382,8 @@ def evaluate_coco(
             "category_ids": list(range(1, num_classes + 1)),
         },
     }
-    return result
+    return (_add_operating_points(result, ground_truth, detections, class_names, coco_eval)
+            if include_operating_points else result)
 
 
 def print_eval_results(results, logger_fn=None):

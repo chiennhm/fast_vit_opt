@@ -115,6 +115,18 @@ def parse_args():
     parser.add_argument("--save-json", action="store_true")
     parser.add_argument("--json-output-dir", default=None)
     parser.add_argument("--save-visualizations", action="store_true")
+    parser.add_argument(
+        "--post-train-eval", action=argparse.BooleanOptionalAction, default=False,
+        help="Evaluate the final best checkpoint overall, by weather and by confidence.",
+    )
+    parser.add_argument(
+        "--confidence-thresholds", nargs="+", type=float,
+        default=[0.001, 0.01, 0.05, 0.10, 0.20, 0.30, 0.50, 0.70, 0.90],
+    )
+    parser.add_argument(
+        "--weather-labels", default=None,
+        help="Raw BDD100K validation JSON with attributes.weather; auto-locate under data-dir.",
+    )
 
     parser.add_argument("--output", default="./output/bdd100k")
     parser.add_argument("--resume", default=None)
@@ -131,6 +143,10 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument(
+        "--epoch-log-only", action=argparse.BooleanOptionalAction, default=False,
+        help="Log epoch summaries only; disable batch logs and train/eval progress bars.",
+    )
+    parser.add_argument(
         "--debug-first-batch", action="store_true",
         help="Log first-batch stages with CUDA synchronization to locate stalls.",
     )
@@ -140,8 +156,18 @@ def parse_args():
     parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
 
+    if args.log_interval < 0:
+        parser.error("--log-interval must be nonnegative")
+    if args.epoch_log_only:
+        if args.debug_first_batch:
+            parser.error("--debug-first-batch requires --no-epoch-log-only")
+        args.log_interval = 0
     if args.eval_only and args.no_eval:
         parser.error("--eval-only and --no-eval are mutually exclusive")
+    if args.post_train_eval and args.no_eval:
+        parser.error("--post-train-eval requires validation; remove --no-eval")
+    if any(not 0 <= value <= 1 for value in args.confidence_thresholds):
+        parser.error("--confidence-thresholds values must be between 0 and 1")
     if args.eval_only and not args.resume:
         parser.error("--eval-only requires --resume")
     if args.accum_steps < 1:
@@ -315,6 +341,48 @@ def _run_evaluation(model, loader, device, args, output_dir):
         save_json=args.save_json,
         json_output_dir=args.json_output_dir,
         model_name=args.model,
+        show_progress=args.log_interval > 0,
+    )
+
+
+def _run_final_evaluation(
+    model, loader, device, args, output_dir, weather_context, checkpoint_path=None,
+):
+    from engine.evaluation_suite import run_evaluation_suite, select_final_checkpoint
+    if checkpoint_path is None:
+        selected, selection = select_final_checkpoint(output_dir, args.resume)
+    else:
+        selected, selection = Path(checkpoint_path), "explicit_eval_checkpoint"
+    load_checkpoint(
+        selected, model, expected_architecture=model.architecture_metadata(),
+        expected_training=_checkpoint_training_contract(args), weights_only=True,
+        allow_missing_metadata=args.allow_missing_checkpoint_metadata,
+    )
+    checkpoint = torch.load(selected, map_location="cpu", weights_only=False)
+    info = {
+        "path": str(selected.resolve()), "sha256": _sha256(selected),
+        "completed_epochs": int(checkpoint.get("epoch", -1)) + 1,
+        "best_map": checkpoint.get("best_map"), "selection": selection,
+        "training_source": checkpoint.get("metadata", {}).get("source"),
+        "evaluation_source_commit": _git_output("rev-parse", "HEAD"),
+        "validation_annotations": str(_dataset_paths(args)["val_ann"].resolve()),
+        "validation_images": str(_dataset_paths(args)["val_img"].resolve()),
+        "preprocessing": {"short_side": args.img_size, "long_side_max": 1333,
+                          "batch_padding_multiple": 32},
+        "evaluation_device": str(device),
+    }
+    del checkpoint
+    groups, weather_path = weather_context
+    return run_evaluation_suite(
+        model, loader, device, class_names=BDD100K_CLASSES,
+        output_dir=Path(output_dir) / "post_training_evaluation",
+        weather_groups=groups, weather_labels_path=weather_path,
+        source_images=loader.dataset.images.values(), checkpoint_info=info,
+        reference_confidence=args.score_thresh,
+        confidence_thresholds=args.confidence_thresholds, amp=args.amp,
+        nms_thresh=args.nms_thresh, max_detections=args.max_detections,
+        pre_nms_topk=args.pre_nms_topk, max_samples=args.max_eval_samples,
+        model_name=args.model,
     )
 
 
@@ -366,6 +434,14 @@ def main():
             val_dataset, eval_batch_size, min(args.workers, 2), False, device
         )
 
+    weather_context = None
+    if args.post_train_eval:
+        # Resolve all weather joins before training, so missing metadata fails early.
+        from engine.evaluation_suite import prepare_weather_groups
+        weather_context = prepare_weather_groups(
+            val_loader.dataset.images.values(), args.data_dir, args.weather_labels,
+        )
+
     model = FastViTDetector(
         model_name=args.model,
         num_classes=len(BDD100K_CLASSES),
@@ -384,6 +460,12 @@ def main():
     )
 
     if args.eval_only:
+        if args.post_train_eval:
+            _run_final_evaluation(
+                model, val_loader, device, args, output_dir, weather_context,
+                checkpoint_path=args.resume,
+            )
+            return
         load_checkpoint(
             args.resume,
             model,
@@ -509,6 +591,10 @@ def main():
 
     if wandb_run is not None:
         wandb_run.finish()
+    if args.post_train_eval:
+        _run_final_evaluation(
+            model, val_loader, device, args, output_dir, weather_context,
+        )
 
 
 if __name__ == "__main__":
